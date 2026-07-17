@@ -1,0 +1,22 @@
+pandas>=2.2
+numpy>=1.26
+pyarrow>=16.0
+requests>=2.31
+PyYAML>=6.0
+python-dateutil>=2.9
+pytest>=8.0
+tqdm>=4.66
+
+# notebooks / EDA
+matplotlib>=3.8
+seaborn>=0.13
+jupyter>=1.0
+ipykernel>=6.29
+
+# modélisation (benchmarks OLS / SURE)
+statsmodels>=0.14
+scipy>=1.11
+
+# dashboard
+streamlit>=1.50
+plotly>=5.24

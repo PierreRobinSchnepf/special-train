@@ -1,0 +1,238 @@
+"""Orchestrateur du pipeline réel : à l'instant présent, produit une prévision
+J (17h) -> J+1 (23h) en utilisant les données réellement disponibles.
+
+Trois écarts par rapport au backtest de `dashboard/services/model_store.py`
+(qui rejoue l'historique où tout est déjà connu) :
+  1. La cible gaz officielle a ~45-50 jours de retard : on comble jusqu'au
+     "jour G" (~15-20 jours) avec `pipeline.gas_freshness` (reconstruction
+     régionale industriel+distribution).
+  2. Au-delà du jour G, il n'y a plus de vérité terrain : l'état Kalman est
+     figé à sa valeur du jour G et propagé (marche aléatoire, sans mise à
+     jour) — c'est le même principe que le lookup de trajectoire du
+     backtest, pas une nouvelle idée statistique.
+  3. La météo entre le jour G et aujourd'hui est réelle (déjà arrivée) ;
+     seule la météo d'aujourd'hui->J+1 est une vraie prévision
+     (`pipeline.weather_forecast`, Open-Meteo).
+
+Le résultat inclut des métadonnées explicites sur la fraîcheur (jour G,
+quelles heures sont sur météo observée vs prévue) pour que le dashboard
+n'affiche jamais une prévision comme plus "réelle" qu'elle ne l'est.
+"""
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+from models.dataset import (
+    PREDICTOR_COLUMNS,
+    TARGET_COLUMN,
+    build_hourly_equations,
+    load_dataset,
+    split_train_test,
+)
+from models.kalman import HourlyKalmanSURModel
+from models.ols import HourlyOLSModel
+from models.persistence import KALMAN_TRAIN_START, OLS_TRAIN_START, SURE_TRAIN_START, load_artifact, save_artifact
+from models.sure import HourlySUREModel
+from pipeline.gas_freshness import fetch_fresh_gas_total, last_available_day
+from pipeline.weather_forecast import continue_temp_smo, fetch_national_temperature
+from src.calendar_features import compute_end_of_year_flag, compute_off_peak_flag, compute_weekday_flags
+from src.fourier_features import compute_fourier_features
+from src.thermal_features import compute_x1_heating, compute_x2_smo_heating
+
+CALENDAR_TZ = "Europe/Paris"
+STATE_COLS = [c for c in PREDICTOR_COLUMNS if c != "beta_0"]
+
+
+@dataclass
+class RealForecastResult:
+    day_j: dt.date
+    day_g: dt.date               # dernier jour de vérité terrain gaz assimilé
+    generated_at: dt.datetime
+    horizon: pd.DataFrame          # timestamp, heure, kalman/ols/sure, source_meteo (observee/prevue)
+    warnings: list[str] = field(default_factory=list)
+
+
+def _build_calendar_features(index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Recompute les blocs Fourier/calendaire pour un index UTC arbitraire
+    (passé récent ou futur), en réutilisant les jours fériés/vacances déjà
+    mis en cache par `fetch_data.py` (cf. limite documentée dans les
+    warnings si l'horizon dépasse leur couverture)."""
+    from build_dataset import load_holidays, load_school_holidays
+    from src.config import load_config as load_pipeline_config
+
+    config = load_pipeline_config()
+    fourier_cfg = config["fourier"]
+
+    fourier_df = compute_fourier_features(index, fourier_cfg["harmonics"], fourier_cfg["days_in_year"], CALENDAR_TZ)
+    weekday_flags = compute_weekday_flags(index, CALENDAR_TZ)
+    end_of_year = compute_end_of_year_flag(index, CALENDAR_TZ, config["calendar"]["end_of_year_window"])
+
+    holiday_dates = load_holidays(config)
+    school_dates = load_school_holidays(config)
+    off_peak = compute_off_peak_flag(index, CALENDAR_TZ, holiday_dates, school_dates, end_of_year)
+
+    beta_0 = pd.Series(1, index=index, name="beta_0")
+    return pd.concat([fourier_df, weekday_flags, end_of_year, off_peak, beta_0], axis=1)
+
+
+def _to_per_hour(df: pd.DataFrame, target_col: str | None = None) -> dict[int, pd.DataFrame]:
+    """Comme `models.dataset.build_hourly_equations`, mais sans exiger de
+    cible non-nulle (utile pour l'horizon futur, où elle n'existe pas) et
+    sans équilibrage entre heures (pas besoin, on ne fait que prédire)."""
+    local = df.index.tz_convert(CALENDAR_TZ)
+    work = df.copy()
+    if target_col is None or target_col not in work.columns:
+        work[TARGET_COLUMN] = np.nan
+        target_col = TARGET_COLUMN
+    work["local_date"] = local.date
+    work["local_hour"] = local.hour
+    work["utc_ts"] = df.index
+    return {h: work[work["local_hour"] == h].set_index("local_date").sort_index() for h in range(24)}
+
+
+def _direct_kalman_predict(model: HourlyKalmanSURModel, per_hour: dict[int, pd.DataFrame]) -> dict[int, pd.Series]:
+    """Prédiction avec l'état FIGÉ (sans jamais l'assimiler/mettre à jour) —
+    c'est la seule opération valide sur un horizon sans vérité terrain :
+    `HourlyKalmanSURModel.predict()` ferait tourner la boucle de mise à jour
+    de Kalman en interne même avec update_state=False côté appelant, ce qui
+    corromprait l'état avec des cibles NaN. On calcule donc directement
+    H_t . état_figé, comme le fait le backtest du dashboard."""
+    preds = {}
+    for h in range(24):
+        frame = per_hour[h]
+        if frame.empty:
+            preds[h] = pd.Series(dtype=float)
+            continue
+        x = frame[STATE_COLS].to_numpy(dtype=float)
+        contrib = x * model.sur_beta_[h][None, :]
+        pred_log = model.intercept_[h] + contrib @ model.beta_state_[h]
+        preds[h] = pd.Series(np.expm1(pred_log), index=frame["utc_ts"].to_numpy())
+    return preds
+
+
+def _static_predict(beta_by_hour, predictor_cols: list[str], per_hour: dict[int, pd.DataFrame]) -> dict[int, pd.Series]:
+    preds = {}
+    for h in range(24):
+        frame = per_hour[h]
+        if frame.empty:
+            preds[h] = pd.Series(dtype=float)
+            continue
+        x = frame[predictor_cols].to_numpy(dtype=float)
+        preds[h] = pd.Series(x @ beta_by_hour[h], index=frame["utc_ts"].to_numpy())
+    return preds
+
+
+def run_real_forecast(now: dt.datetime | None = None) -> RealForecastResult:
+    warnings: list[str] = []
+    now = now or dt.datetime.now(dt.timezone.utc)
+    day_j = now.astimezone().date()  # jour civil local "aujourd'hui"
+    day_j1 = day_j + dt.timedelta(days=1)
+
+    # --- 1. Modèles "production" pré-entraînés (train_models.py --only production) :
+    #        OLS/SURE >= 2020, Kalman >= 2018, tous jusqu'à fin 2025 inclus (pas de
+    #        test réservé — "on retrain une dernière fois avec les données 2025"). ---
+    df = load_dataset()
+    per_hour_all = build_hourly_equations(df)
+
+    ols = load_artifact("production_ols")
+    sure = load_artifact("production_sure")
+    kalman = load_artifact("production_kalman")
+
+    if ols is None or sure is None or kalman is None:
+        warnings.append(
+            "Artefacts 'production' absents de data/models/ — entraînement à la volée "
+            "(~40s). Lancez `python train_models.py` pour éviter ce coût à chaque run."
+        )
+        if ols is None:
+            ols_train, _ = split_train_test(per_hour_all, "2026-01-01", "2026-01-01", train_start=OLS_TRAIN_START)
+            ols = HourlyOLSModel().fit(ols_train)
+            save_artifact(ols, "production_ols")
+        if sure is None:
+            sure_train, _ = split_train_test(per_hour_all, "2026-01-01", "2026-01-01", train_start=SURE_TRAIN_START)
+            sure = HourlySUREModel().fit(sure_train)
+            save_artifact(sure, "production_sure")
+        if kalman is None:
+            kalman_train, _ = split_train_test(per_hour_all, "2026-01-01", "2026-01-01", train_start=KALMAN_TRAIN_START)
+            kalman = HourlyKalmanSURModel().fit(kalman_train)
+            save_artifact(kalman, "production_kalman")
+
+    # --- 2. Rattrape le "stub" au-delà de la fenêtre d'entraînement production
+    #        (ex. 2026-01-01 -> dernier jour de dataset_final.parquet) ---
+    last_dataset_date = df.index.max().date()
+    stub = {
+        h: frame[(frame.index >= dt.date(2026, 1, 1))]
+        for h, frame in per_hour_all.items()
+    }
+    if len(stub[0]):
+        kalman.predict(stub, update_state=True)
+
+    last_temp_smo = float(df["temp_smo"].iloc[-1])
+    last_kappa = 0.98  # cf. config.yaml § thermal.kappa (valeur figée à l'entraînement)
+
+    # --- 3. Comble jusqu'au jour G avec les données régionales fraîches ---
+    fresh_start = last_dataset_date + dt.timedelta(days=1)
+    try:
+        fresh_gas = fetch_fresh_gas_total(fresh_start, day_j)
+    except Exception as exc:  # réseau/ODRÉ indisponible : on continue sans, état figé plus tôt
+        warnings.append(f"Échec récupération conso gaz fraîche (régionale) : {exc}")
+        fresh_gas = pd.Series(dtype=float)
+
+    day_g = last_available_day(fresh_gas) or last_dataset_date
+    if day_g <= last_dataset_date:
+        warnings.append("Aucune donnée gaz plus fraîche que le dataset existant — état Kalman non rafraîchi.")
+
+    # --- 4. Météo : actuals (fresh_start -> aujourd'hui) + prévision (aujourd'hui -> J+1) ---
+    past_days = max((now.date() - fresh_start).days + 2, 2)
+    temp_national = fetch_national_temperature(past_days=past_days, forecast_days=2)
+    temp_smo = continue_temp_smo(last_temp_smo, temp_national, last_kappa)
+
+    weather_df = pd.DataFrame({"temp_raw_c": temp_national, "temp_smo": temp_smo})
+    weather_df["X1_heating"] = compute_x1_heating(weather_df["temp_raw_c"], 15.0)
+    weather_df["X2_smo_heating"] = compute_x2_smo_heating(weather_df["temp_smo"], 15.0)
+
+    calendar_df = _build_calendar_features(weather_df.index)
+    features_df = pd.concat([weather_df[["temp_smo", "X1_heating", "X2_smo_heating"]], calendar_df], axis=1)
+
+    # --- 5. Assimile jour G (si de la vérité terrain est disponible dans cette fenêtre) ---
+    gap_end = pd.Timestamp(day_g, tz="UTC") + pd.Timedelta(hours=23)
+    gap_features = features_df.loc[features_df.index <= gap_end].copy()
+    if not fresh_gas.empty:
+        gap_features[TARGET_COLUMN] = fresh_gas.reindex(gap_features.index)
+        gap_features = gap_features.dropna(subset=[TARGET_COLUMN])
+        if len(gap_features):
+            gap_per_hour = _to_per_hour(gap_features, target_col=TARGET_COLUMN)
+            kalman.predict(gap_per_hour, update_state=True)
+
+    # --- 6. Prévision finale : J[17h-23h] + J+1[0h-23h], état figé au jour G ---
+    horizon_start = pd.Timestamp(day_j, tz="UTC") + pd.Timedelta(hours=17)
+    horizon_end = pd.Timestamp(day_j1, tz="UTC") + pd.Timedelta(hours=23)
+    horizon_features = features_df.loc[(features_df.index >= horizon_start) & (features_df.index <= horizon_end)]
+
+    if horizon_features.empty:
+        warnings.append("Aucune donnée météo disponible sur l'horizon demandé (J 17h -> J+1 23h).")
+
+    horizon_per_hour = _to_per_hour(horizon_features)
+    kalman_preds = _direct_kalman_predict(kalman, horizon_per_hour)
+    ols_beta = ols.beta_
+    sure_beta = {h: sure.beta_[h] for h in range(24)}
+    ols_preds = _static_predict(ols_beta, PREDICTOR_COLUMNS, horizon_per_hour)
+    sure_preds = _static_predict(sure_beta, PREDICTOR_COLUMNS, horizon_per_hour)
+
+    rows = []
+    forecast_cutoff = temp_national.index.min() + pd.Timedelta(days=past_days)  # approx: au-delà = météo prévue
+    for h in range(24):
+        for ts in horizon_per_hour[h]["utc_ts"] if len(horizon_per_hour[h]) else []:
+            rows.append({
+                "timestamp": ts, "heure_locale": h,
+                "kalman": kalman_preds[h].get(ts), "ols": ols_preds[h].get(ts), "sure": sure_preds[h].get(ts),
+                "source_meteo": "prevue" if ts >= pd.Timestamp(now.astimezone(dt.timezone.utc)) else "observee",
+            })
+    horizon = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+
+    return RealForecastResult(
+        day_j=day_j, day_g=day_g, generated_at=now, horizon=horizon, warnings=warnings,
+    )

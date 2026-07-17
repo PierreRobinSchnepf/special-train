@@ -1,0 +1,92 @@
+{
+  "75": {
+    "num_poste": "75114001",
+    "lat": 48.821667,
+    "lon": 2.337833,
+    "region_label": "Paris / Île-de-France"
+  },
+  "59": {
+    "num_poste": "59343001",
+    "lat": 50.57,
+    "lon": 3.0975,
+    "region_label": "Nord (Lille)"
+  },
+  "69": {
+    "num_poste": "69299001",
+    "lat": 45.7265,
+    "lon": 5.077833,
+    "region_label": "Rhône (Lyon)"
+  },
+  "13": {
+    "num_poste": "13054001",
+    "lat": 43.437,
+    "lon": 5.2115,
+    "region_label": "Bouches-du-Rhône (Marseille)"
+  },
+  "31": {
+    "num_poste": "31299001",
+    "lat": 43.4515,
+    "lon": 1.262,
+    "region_label": "Haute-Garonne (Toulouse)"
+  },
+  "33": {
+    "num_poste": "33281001",
+    "lat": 44.830667,
+    "lon": -0.691333,
+    "region_label": "Gironde (Bordeaux)"
+  },
+  "44": {
+    "num_poste": "44103001",
+    "lat": 47.313833,
+    "lon": -2.1545,
+    "region_label": "Loire-Atlantique (Nantes)"
+  },
+  "67": {
+    "num_poste": "67124001",
+    "lat": 48.5495,
+    "lon": 7.640333,
+    "region_label": "Bas-Rhin (Strasbourg)"
+  },
+  "35": {
+    "num_poste": "35228001",
+    "lat": 48.584833,
+    "lon": -2.076333,
+    "region_label": "Ille-et-Vilaine (Rennes)"
+  },
+  "38": {
+    "num_poste": "38384001",
+    "lat": 45.364,
+    "lon": 5.313333,
+    "region_label": "Isère (Grenoble)"
+  },
+  "76": {
+    "num_poste": "76116001",
+    "lat": 49.3895,
+    "lon": 1.178333,
+    "region_label": "Seine-Maritime (Rouen)"
+  },
+  "06": {
+    "num_poste": "06077006",
+    "lat": 43.929167,
+    "lon": 7.363333,
+    "region_label": "Alpes-Maritimes (Nice)"
+  },
+  "21": {
+    "num_poste": "21603001",
+    "lat": 47.482,
+    "lon": 4.34,
+    "region_label": "Côte-d'Or (Dijon)"
+  },
+  "63": {
+    "num_poste": "63113001",
+    "lat": 45.786833,
+    "lon": 3.149333,
+    "region_label": "Puy-de-Dôme (Clermont-Ferrand)"
+  },
+  "51": {
+    "num_poste": "51242001",
+    "lat": 48.939833,
+    "lon": 4.3085,
+    "region_label": "Marne (Reims)"
+  }
+}

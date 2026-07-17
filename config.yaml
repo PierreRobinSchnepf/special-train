@@ -1,0 +1,175 @@
+# Configuration unique du pipeline. Aucun paramètre "en dur" ne doit apparaître
+# ailleurs dans le code : tout coefficient, seuil ou fenêtre de date vit ici.
+
+# ---------------------------------------------------------------------------
+# Fenêtre temporelle du dataset final
+# ---------------------------------------------------------------------------
+date_range:
+  start: "2018-01-01T00:00:00Z"   # borne inférieure demandée par le rapport
+  end: null                        # null = jusqu'à la dernière donnée disponible
+
+# ---------------------------------------------------------------------------
+# Convention de fuseau horaire
+# ---------------------------------------------------------------------------
+# Index maître du dataset : horaire UTC continu (pas de doublon/trou DST).
+# - y (gaz, ODRÉ)      : `date_heure` est déjà en UTC (vérifié : 23:30 heure
+#   locale Paris <-> 21:30Z en été, écart de +2h = CEST). Aucune conversion.
+# - T (SYNOP Météo-France) : `AAAAMMJJHH` est en UTC (convention SYNOP standard).
+#   Aucune conversion.
+# - Les variables calendaires (jour de semaine, jour de l'année pour Fourier,
+#   jours fériés, vacances scolaires, fin d'année) dépendent du calendrier
+#   CIVIL FRANÇAIS, donc sont dérivées de l'horodatage converti en
+#   Europe/Paris (uniquement pour en extraire la date locale), puis
+#   réattachées à l'index UTC. Ceci évite de mal classer les heures
+#   22:00–23:59 UTC (qui appartiennent déjà au jour civil suivant à Paris).
+timezone:
+  master_index: "UTC"
+  calendar_reference: "Europe/Paris"
+
+# ---------------------------------------------------------------------------
+# Source 1 : consommation gaz horaire (y)
+# ---------------------------------------------------------------------------
+gas:
+  dataset_id: "consommation-quotidienne-brute"
+  # Endpoint v2 "exports/csv" : pas de limite offset+limit<=10000 (contrairement
+  # à /records qui plafonne à 10k lignes cumulées) ni de troncature ~4 Mo
+  # (contrairement à l'endpoint v1 /api/records/1.0/download/). Vérifié
+  # empiriquement le 2026-07-16. Chunké par année civile pour rester sous
+  # les limites de taille de réponse et permettre un cache incrémental.
+  base_url: "https://odre.opendatasoft.com/api/v2/catalog/datasets/consommation-quotidienne-brute/exports/csv"
+  # Champ constaté au 2026-07-16 (le champ "gaz_grtgaz" mentionné dans la
+  # spec initiale n'existe plus : le schéma a évolué vers un champ agrégé
+  # GRTgaz+Terega). Vérifier via l'endpoint catalog/datasets si le fetch échoue.
+  value_field: "consommation_brute_gaz_totale"
+  datetime_field: "date_heure"
+  unit: "MW PCS 0°C"
+  perimeter: "France continentale (réseaux GRTgaz + Terega)"
+
+# ---------------------------------------------------------------------------
+# Source 2 : température horaire (Météo-France, données climatologiques
+# de base horaires, fichiers par département)
+# ---------------------------------------------------------------------------
+meteo:
+  datagouv_dataset_id: "6569b4473bedf2e7abad3b72"  # "Données climatologiques de base - horaires"
+  # Panier de stations : un département "représentatif" par grande zone
+  # climatique/démographique de France continentale. Le fichier département
+  # contient plusieurs postes (NUM_POSTE) ; le poste retenu par département
+  # est choisi AUTOMATIQUEMENT au run comme celui ayant la meilleure
+  # couverture non-nulle de la colonne T sur la période — ce choix est loggé
+  # dans data/raw/meteo/station_selection.json pour audit, plutôt que deviné
+  # silencieusement.
+  #
+  # Pondération : proxy démographique (population du département, ordre de
+  # grandeur INSEE ~2021, PAS une zone officielle GRTgaz — cette dernière
+  # n'est pas publiée en open data). Choix documenté explicitement plutôt
+  # que supposé : voir data_dictionary.md § Température nationale.
+  stations:
+    - department: "75"
+      region_label: "Paris / Île-de-France"
+      weight: 2133000
+    - department: "59"
+      region_label: "Nord (Lille)"
+      weight: 2604000
+    - department: "69"
+      region_label: "Rhône (Lyon)"
+      weight: 1876000
+    - department: "13"
+      region_label: "Bouches-du-Rhône (Marseille)"
+      weight: 2043000
+    - department: "31"
+      region_label: "Haute-Garonne (Toulouse)"
+      weight: 1400000
+    - department: "33"
+      region_label: "Gironde (Bordeaux)"
+      weight: 1633000
+    - department: "44"
+      region_label: "Loire-Atlantique (Nantes)"
+      weight: 1442000
+    - department: "67"
+      region_label: "Bas-Rhin (Strasbourg)"
+      weight: 1132000
+    - department: "35"
+      region_label: "Ille-et-Vilaine (Rennes)"
+      weight: 1088000
+    - department: "38"
+      region_label: "Isère (Grenoble)"
+      weight: 1271000
+    - department: "76"
+      region_label: "Seine-Maritime (Rouen)"
+      weight: 1255000
+    - department: "06"
+      region_label: "Alpes-Maritimes (Nice)"
+      weight: 1094000
+    - department: "21"
+      region_label: "Côte-d'Or (Dijon)"
+      weight: 532000
+    - department: "63"
+      region_label: "Puy-de-Dôme (Clermont-Ferrand)"
+      weight: 662000
+    - department: "51"
+      region_label: "Marne (Reims)"
+      weight: 566000
+  min_period_start_year: 2010  # ne télécharge que les archives décennales >= cette année
+  value_field: "T"             # °C, déjà en unités réelles (pas de /10 à appliquer)
+  station_id_field: "NUM_POSTE"
+  datetime_field: "AAAAMMJJHH"
+  datetime_format: "%Y%m%d%H"
+  # Comblement des trous courts avant le lissage EWMA (capteur hors ligne
+  # quelques heures). Au-delà, la valeur reste NaN et est loggée en QC.
+  max_ffill_gap_hours: 3
+
+# ---------------------------------------------------------------------------
+# Source 3 : jours fériés
+# ---------------------------------------------------------------------------
+holidays:
+  url: "https://etalab.github.io/jours-feries-france-data/csv/jours_feries_metropole.csv"
+
+# ---------------------------------------------------------------------------
+# Source 4 : vacances scolaires (zones A/B/C)
+# ---------------------------------------------------------------------------
+school_holidays:
+  api_url: "https://data.education.gouv.fr/api/records/1.0/search/"
+  dataset_id: "fr-en-calendrier-scolaire"
+  page_size: 2000
+  zones_metropole: ["Zone A", "Zone B", "Zone C"]
+
+# ---------------------------------------------------------------------------
+# Bloc thermique (Tableau 1)
+# ---------------------------------------------------------------------------
+thermal:
+  t_base_celsius: 15.0   # seuil de base pour X1_heating et X2_smo_heating
+  kappa: 0.98             # T_smo_t = kappa*T_smo_{t-1} + (1-kappa)*T_t (Dordonnat et al.)
+  init_method: "first_observation"  # T_smo_0 = T_0 ; alternative documentée : "first_week_mean"
+
+# ---------------------------------------------------------------------------
+# Bloc saisonnier (Fourier)
+# ---------------------------------------------------------------------------
+fourier:
+  harmonics: [1, 2, 3, 4]
+  days_in_year: 365.25
+
+# ---------------------------------------------------------------------------
+# Bloc calendaire
+# ---------------------------------------------------------------------------
+calendar:
+  end_of_year_window: { start_month: 12, start_day: 24, end_month: 12, end_day: 31 }
+  # AMBIGUÏTÉ SIGNALÉE (cf. spec) : le rapport mentionne un possible creux
+  # mi-août sans le lister dans le Tableau 1. NON implémenté ici — pas de
+  # colonne is_mid_august. À confirmer avec l'auteur du rapport avant ajout.
+  mid_august_dip: null
+  # AMBIGUÏTÉ SIGNALÉE : is_off_peak_period n'a pas de définition opérationnelle
+  # unique dans le rapport source ("vacances, jours fériés et trêve de fin
+  # d'année"). Définition PROPOSÉE et documentée ici plutôt que supposée :
+  #   is_off_peak_period = 1 si (jour férié France métropolitaine)
+  #                          OR (au moins une zone scolaire A/B/C en vacances)
+  #                          OR (is_end_of_year == 1)
+  # Recouvrement volontaire avec is_end_of_year (le rapport les associe déjà
+  # dans la même ligne du Tableau 1) : les deux colonnes sont conservées
+  # séparément pour laisser le modèle estimer un effet différentiel.
+  off_peak_definition: "holiday OR any_school_zone_on_break OR end_of_year"
+
+output:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  parquet_path: "data/processed/dataset_final.parquet"
+  data_dictionary_path: "data_dictionary.md"
