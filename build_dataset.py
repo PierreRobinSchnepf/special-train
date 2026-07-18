@@ -74,7 +74,14 @@ def _pick_best_station(df: pd.DataFrame, station_field: str, value_field: str) -
     return coverage.idxmax()
 
 
-def load_meteo_national(config: dict) -> pd.Series:
+def load_per_department_temp(config: dict) -> tuple[dict[str, pd.Series], dict[str, float]]:
+    """Charge la série de température (poste le mieux couvert) pour chaque
+    département configuré, indexée UTC. Écrit le log de sélection de poste.
+    Base commune aux agrégations nationale ET régionale (Étape B) : la sélection
+    de poste et la pondération population sont ainsi partagées, pas dupliquées.
+
+    Retourne (per_dept_series, weights) où les clés sont les codes département.
+    """
     meteo_cfg = config["meteo"]
     raw_dir = resolve_path(config["output"]["raw_dir"]) / "meteo"
     station_field = meteo_cfg["station_id_field"]
@@ -113,6 +120,7 @@ def load_meteo_national(config: dict) -> pd.Series:
         per_dept_series[dep] = series
         weights[dep] = float(station_cfg["weight"])
         selection_log[dep] = {
+            "region_code": station_cfg.get("region_code"),
             "region_label": station_cfg.get("region_label"),
             "selected_station": best_station,
             "n_stations_in_department": int(dep_df[station_field].nunique()) if station_field in dep_df else None,
@@ -131,25 +139,39 @@ def load_meteo_national(config: dict) -> pd.Series:
     if not per_dept_series:
         raise RuntimeError("no meteo data loaded for any configured department")
 
-    wide = pd.DataFrame(per_dept_series)
+    return per_dept_series, weights
 
+
+def renormalized_weighted_mean(wide_filled: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
+    """Moyenne pondérée par ligne, avec renormalisation des poids sur les seules
+    colonnes disponibles à chaque instant (pour ne pas biaiser la moyenne quand
+    une station manque). NaN si aucune colonne disponible sur la ligne. Utilisé
+    à l'identique pour le national (toutes les colonnes) et le régional (colonnes
+    d'une région)."""
+    weight_series = pd.Series(weights)
+    available_mask = wide_filled.notna()
+    row_weights = available_mask.mul(weight_series, axis=1)
+    row_weight_sums = row_weights.sum(axis=1)
+    weighted_values = (wide_filled.fillna(0) * row_weights).sum(axis=1)
+    out = weighted_values / row_weight_sums
+    out[row_weight_sums == 0] = np.nan
+    return out
+
+
+def load_meteo_national(config: dict) -> pd.Series:
+    meteo_cfg = config["meteo"]
+    per_dept_series, weights = load_per_department_temp(config)
+
+    wide = pd.DataFrame(per_dept_series)
     # Comblement des trous courts (capteur hors ligne quelques heures) avant
     # toute agrégation ou lissage — trous plus longs laissés en NaN.
     max_gap = meteo_cfg["max_ffill_gap_hours"]
     wide_filled = wide.ffill(limit=max_gap)
 
-    weight_series = pd.Series(weights)
+    national_temp = renormalized_weighted_mean(wide_filled, weights).rename("temp_c")
+
     available_mask = wide_filled.notna()
-    # Renormalisation des poids par ligne sur les départements disponibles,
-    # pour ne pas biaiser la moyenne nationale quand un département manque.
-    row_weights = available_mask.mul(weight_series, axis=1)
-    row_weight_sums = row_weights.sum(axis=1)
-    weighted_values = (wide_filled.fillna(0) * row_weights).sum(axis=1)
-
-    national_temp = weighted_values / row_weight_sums
-    national_temp[row_weight_sums == 0] = np.nan
-    national_temp = national_temp.rename("temp_c")
-
+    row_weight_sums = available_mask.mul(pd.Series(weights), axis=1).sum(axis=1)
     n_partial = (available_mask.sum(axis=1) < len(weights)).sum()
     logger.info(
         "meteo: %d/%d departments aggregated, %d hour(s) used renormalized weights (missing dept), %d fully missing",

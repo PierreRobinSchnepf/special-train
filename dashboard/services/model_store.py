@@ -1,16 +1,20 @@
-"""Charge et entraîne une seule fois (au démarrage de Flask) les 3 modèles de
-la phase R&D, et expose les méthodes de lookup dont le dashboard a besoin :
-prédiction d'une heure donnée pour un jour J avec la bonne règle "quelles
-données étaient déjà connues au moment de la prévision".
+"""Charge (ou entraîne+sauvegarde une fois) les modèles et expose les méthodes
+de lookup du dashboard : prévision d'une heure d'un jour J avec la bonne règle
+"quelles données étaient déjà connues au moment de la prévision".
+
+Une seule classe `ModelStore` sert deux périmètres :
+  - **National** (`region_code=None`) : dataset_final + 3 modèles (Kalman, OLS,
+    SURE), jeu backtest, test 2025. Comportement historique inchangé.
+  - **Régional** (`region_code=<int>`) : dataset_region_<code> + 2 modèles
+    (Kalman, SURE — l'OLS est exclu au régional), jeu backtest, fenêtre de test
+    définie dans config.yaml § regional_models.
+
+Le dashboard itère sur `store.models` (liste ordonnée (clé, libellé)) plutôt que
+de coder en dur les 3 modèles : ajouter/retirer un modèle ne touche qu'ici.
 
 Règle d'assimilation (cf. spec : à J 17h, on prévoit J[17h-23h] + J+1[0h-23h]) :
-pour une heure cible `hour`, la dernière occurrence RÉELLEMENT déjà connue à
-"J 17h" est :
-  - aujourd'hui (J) si hour <= 16 (déjà passée dans la journée)
-  - hier (J-1) si hour >= 17 (pas encore arrivée aujourd'hui)
-Cette règle est la même que la cible du jour soit J (heures 17-23) ou J+1
-(toutes les heures) : ce qui compte, c'est uniquement si l'heure `hour` a déjà
-eu lieu AUJOURD'HUI (jour J, l'instant où on se place pour prévoir).
+pour une heure cible `hour`, la dernière occurrence réellement connue à "J 17h"
+est aujourd'hui (J) si hour <= 16, sinon hier (J-1).
 """
 from __future__ import annotations
 
@@ -29,14 +33,29 @@ from models.dataset import (
 )
 from models.kalman import HourlyKalmanSURModel
 from models.ols import HourlyOLSModel
-from models.persistence import KALMAN_TRAIN_START, OLS_TRAIN_START, SURE_TRAIN_START, load_artifact, save_artifact
+from models.persistence import (
+    KALMAN_TRAIN_START,
+    OLS_TRAIN_START,
+    SURE_TRAIN_START,
+    load_artifact,
+    regional_artifact_name,
+    save_artifact,
+)
 from models.sure import HourlySUREModel
+from src.config import load_config, resolve_path
 
-TEST_START = "2025-01-01"
-TEST_END = "2026-01-01"
+NATIONAL_TEST_START = "2025-01-01"
+NATIONAL_TEST_END = "2026-01-01"
 
-# Regroupement des prédicteurs par bloc du Tableau 1, pour la décomposition
-# explicable de la prévision (onglet Forecast).
+# Libellés des modèles (l'ordre définit l'ordre d'affichage ; le premier est
+# "notre prédiction" mise en avant).
+_LABELS = {
+    "kalman": "Kalman (notre prédiction)",
+    "ols": "OLS (statique)",
+    "sure": "SURE (statique)",
+}
+
+# Regroupement des prédicteurs par bloc du Tableau 1 (décomposition explicable).
 BLOCKS: dict[str, list[str]] = {
     "Thermique": ["temp_smo", "X1_heating", "X2_smo_heating"],
     "Saisonnier (Fourier)": [
@@ -51,85 +70,111 @@ def _assimilated_date(day_j: dt.date, hour: int) -> dt.date:
 
 
 @dataclass
+class ModelPred:
+    value: float
+    lo: float
+    hi: float
+
+
+@dataclass
 class HourPrediction:
     date: dt.date
     hour: int
-    kalman: float
-    kalman_lo: float
-    kalman_hi: float
-    ols: float
-    ols_lo: float
-    ols_hi: float
-    sure: float
-    sure_lo: float
-    sure_hi: float
     actual: float | None
+    preds: dict[str, ModelPred]          # clé modèle -> (valeur, IC bas, IC haut)
     decomposition_log: dict[str, float] = field(default_factory=dict)
 
 
 class ModelStore:
-    def __init__(self) -> None:
-        self.df = load_dataset()
+    def __init__(self, region_code: int | None = None) -> None:
+        self.region_code = region_code
+        config = load_config()
+
+        if region_code is None:
+            # --- périmètre national ---
+            self.label = "National"
+            self.model_keys = ["kalman", "ols", "sure"]
+            self.test_start, self.test_end = NATIONAL_TEST_START, NATIONAL_TEST_END
+            self.df = load_dataset()
+            self._artifact = lambda key: f"backtest_{key}"
+            self._train_start = {"ols": OLS_TRAIN_START, "sure": SURE_TRAIN_START, "kalman": KALMAN_TRAIN_START}
+        else:
+            # --- périmètre régional (OLS exclu) ---
+            rm = config["regional_models"]
+            names = {int(k): v for k, v in config["gas_regional"]["regions"].items()}
+            self.label = f"{region_code} — {names[region_code]}"
+            self.model_keys = ["kalman", "sure"]
+            self.test_start, self.test_end = rm["test_start"], rm["test_end"]
+            ds = resolve_path(config["output"]["processed_dir"]) / rm["dataset_subdir"] / f"dataset_region_{region_code}.parquet"
+            self.df = load_dataset(ds)
+            self._artifact = lambda key: regional_artifact_name(region_code, key, "backtest")
+            ts = rm["train_start"]
+            self._train_start = {"sure": ts, "kalman": ts}
+
+        self.models = [(k, _LABELS[k]) for k in self.model_keys]
+        self.has_ols = "ols" in self.model_keys
+
         self.per_hour_all = build_hourly_equations(self.df)
-        self.train, self.test = split_train_test(self.per_hour_all, test_start=TEST_START, test_end=TEST_END)
+        self.train, self.test = split_train_test(self.per_hour_all, test_start=self.test_start, test_end=self.test_end)
+        self.full_per_hour = {h: pd.concat([self.train[h], self.test[h]]).sort_index() for h in range(24)}
 
-        # Panel combiné (train+test), pour retrouver la ligne de prédicteurs
-        # ou la valeur observée à n'importe quelle date de la période étudiée.
-        self.full_per_hour = {
-            h: pd.concat([self.train[h], self.test[h]]).sort_index() for h in range(24)
-        }
+        self._load_or_train()
 
-        self.ols = load_artifact("backtest_ols")
-        self.sure = load_artifact("backtest_sure")
-        self.kalman = load_artifact("backtest_kalman")
-
-        if self.ols is None:
-            print("[model_store] pas d'artefact 'backtest_ols' — entraînement (train >= 2020) + sauvegarde...")
-            ols_train, _ = split_train_test(self.per_hour_all, TEST_START, TEST_END, train_start=OLS_TRAIN_START)
-            self.ols = HourlyOLSModel().fit(ols_train)
-            save_artifact(self.ols, "backtest_ols")
-        if self.sure is None:
-            print("[model_store] pas d'artefact 'backtest_sure' — entraînement (train >= 2020) + sauvegarde...")
-            sure_train, _ = split_train_test(self.per_hour_all, TEST_START, TEST_END, train_start=SURE_TRAIN_START)
-            self.sure = HourlySUREModel().fit(sure_train)
-            save_artifact(self.sure, "backtest_sure")
-        if self.kalman is None:
-            print("[model_store] pas d'artefact 'backtest_kalman' — entraînement (train >= 2018) + sauvegarde...")
-            kalman_train, kalman_test = split_train_test(self.per_hour_all, TEST_START, TEST_END, train_start=KALMAN_TRAIN_START)
-            self.kalman = HourlyKalmanSURModel().fit(kalman_train)
-            self.kalman.predict(kalman_test)
-            save_artifact(self.kalman, "backtest_kalman")
-        print("[model_store] ready (modèles chargés depuis data/models/).")
-
-        self.state_cols = self.kalman.state_cols
-        # Résidu (variance) de l'OLS/SURE en niveau, par heure — pour les IC.
-        self._ols_mse = self.ols.mse_resid_
+        # Attributs de commodité pour les IC (variance résiduelle en niveau).
+        self._ols_mse = self.ols.mse_resid_ if self.has_ols else None
         self._sure_mse = self.sure.stage1_resid_var_
+        self.state_cols = self.kalman.state_cols
 
     # ------------------------------------------------------------------
+    def _load_or_train(self) -> None:
+        """Charge les artefacts ; entraîne+sauvegarde uniquement ceux qui manquent."""
+        self.ols = self.sure = self.kalman = None
 
+        if self.has_ols:
+            self.ols = load_artifact(self._artifact("ols"))
+            if self.ols is None:
+                print(f"[model_store {self.label}] entraînement OLS + sauvegarde...")
+                train, _ = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["ols"])
+                self.ols = HourlyOLSModel().fit(train)
+                save_artifact(self.ols, self._artifact("ols"))
+
+        self.sure = load_artifact(self._artifact("sure"))
+        if self.sure is None:
+            print(f"[model_store {self.label}] entraînement SURE + sauvegarde...")
+            train, _ = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["sure"])
+            self.sure = HourlySUREModel().fit(train)
+            save_artifact(self.sure, self._artifact("sure"))
+
+        self.kalman = load_artifact(self._artifact("kalman"))
+        if self.kalman is None:
+            print(f"[model_store {self.label}] entraînement Kalman + sauvegarde...")
+            train, test = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["kalman"])
+            self.kalman = HourlyKalmanSURModel().fit(train)
+            self.kalman.predict(test)  # avance l'état sur le test
+            save_artifact(self.kalman, self._artifact("kalman"))
+        print(f"[model_store {self.label}] ready.")
+
+    # ------------------------------------------------------------------
     def selectable_days(self) -> list[str]:
-        """Jours J sélectionnables : année de test 2025, en laissant assez de
-        marge pour que J+1 reste dans l'année (cf. choix utilisateur)."""
-        start = pd.Timestamp("2025-01-01").date()
-        end = pd.Timestamp("2025-12-30").date()
-        return [d.isoformat() for d in pd.date_range(start, end, freq="D").date]
+        """Jours J sélectionnables : jours de la fenêtre de test présents dans le
+        panel, en laissant un jour de marge pour que J+1 reste couvert."""
+        test_dates = sorted(self.test[0].index)
+        if not test_dates:
+            return []
+        return [d.isoformat() for d in test_dates[:-1]]
 
     def _predictor_row(self, hour: int, date: dt.date) -> pd.Series | None:
         frame = self.full_per_hour[hour]
         if date not in frame.index:
             return None
         row = frame.loc[date]
-        if isinstance(row, pd.DataFrame):  # garde-fou (ne devrait pas arriver, panel dédupliqué)
+        if isinstance(row, pd.DataFrame):  # garde-fou (panel dédupliqué)
             row = row.iloc[0]
         return row
 
     def _apply_what_if(self, row: pd.Series, temp_delta: float) -> pd.Series:
-        """Décale la température prévue de `temp_delta` °C sur l'horizon de
-        prévision. Approximation documentée : on décale directement les 3
-        variables thermiques déjà calculées (pas de recalcul de l'EWMA complet
-        de temp_smo à partir de la série brute) — suffisant pour explorer une
-        sensibilité, pas pour une prévision opérationnelle."""
+        """Décale la température prévue de `temp_delta` °C (approximation : décale
+        directement les 3 variables thermiques, sans recalcul de l'EWMA)."""
         if temp_delta == 0.0:
             return row
         row = row.copy()
@@ -139,6 +184,36 @@ class ModelStore:
         return row
 
     # ------------------------------------------------------------------
+    def _static_pred(self, beta: np.ndarray, mse_h: float, x_all: np.ndarray) -> ModelPred:
+        pred = float(x_all @ beta)
+        se = float(np.sqrt(mse_h))
+        return ModelPred(pred, pred - 1.96 * se, pred + 1.96 * se)
+
+    def _kalman_pred(self, row: pd.Series, hour: int, day_j: dt.date) -> tuple[ModelPred, dict[str, float]]:
+        assim_date = _assimilated_date(day_j, hour)
+        traj = self.kalman.full_beta_trajectory(hour)
+        lookup_date = min(max(assim_date, traj.index.min()), traj.index.max())
+        state = traj.loc[lookup_date].to_numpy(dtype=float)
+
+        x_state = row[self.state_cols].to_numpy(dtype=float)
+        contrib = x_state * self.kalman.sur_beta_[hour]     # contribution structurelle SUR (log)
+        pred_log = self.kalman.intercept_[hour] + float(contrib @ state)
+        kalman_pred = float(np.expm1(pred_log))
+
+        P = self.kalman.P_state_[hour]
+        var_log = float(contrib @ P @ contrib.T + self.kalman.V_[hour])
+        se_log = np.sqrt(max(var_log, 0.0))
+        pred = ModelPred(
+            kalman_pred,
+            float(np.expm1(pred_log - 1.96 * se_log)),
+            float(np.expm1(pred_log + 1.96 * se_log)),
+        )
+
+        decomposition_log = {"Fond de roulement (beta0)": self.kalman.intercept_[hour]}
+        for block_name, cols in BLOCKS.items():
+            idx = [self.state_cols.index(c) for c in cols]
+            decomposition_log[block_name] = float(np.sum(contrib[idx] * state[idx]))
+        return pred, decomposition_log
 
     def predict_hour(
         self, day_j: dt.date, target_date: dt.date, hour: int, temp_delta: float = 0.0
@@ -147,48 +222,14 @@ class ModelStore:
         if row is None:
             return None
         row = self._apply_what_if(row, temp_delta)
-
         x_all = row[PREDICTOR_COLUMNS].to_numpy(dtype=float)
 
-        # --- OLS (niveau, statique) ---
-        ols_beta = self.ols.beta_[hour]
-        ols_pred = float(x_all @ ols_beta)
-        ols_se = float(np.sqrt(self._ols_mse[hour]))
-        ols_lo, ols_hi = ols_pred - 1.96 * ols_se, ols_pred + 1.96 * ols_se
-
-        # --- SURE (niveau, statique) ---
-        sure_beta = self.sure.beta_[hour]
-        sure_pred = float(x_all @ sure_beta)
-        sure_se = float(np.sqrt(self._sure_mse[hour]))
-        sure_lo, sure_hi = sure_pred - 1.96 * sure_se, sure_pred + 1.96 * sure_se
-
-        # --- Kalman-adjusted SUR (log, dynamique) : "notre prédiction" ---
-        assim_date = _assimilated_date(day_j, hour)
-        traj = self.kalman.full_beta_trajectory(hour)
-        lookup_date = min(assim_date, traj.index.max())
-        lookup_date = max(lookup_date, traj.index.min())
-        state = traj.loc[lookup_date].to_numpy(dtype=float)
-
-        x_state = row[self.state_cols].to_numpy(dtype=float)
-        sur_beta_h = self.kalman.sur_beta_[hour]
-        contrib = x_state * sur_beta_h  # contribution structurelle SUR (log), par variable
-        pred_log = self.kalman.intercept_[hour] + float(contrib @ state)
-        kalman_pred = float(np.expm1(pred_log))
-
-        # IC approximatif : P "convergée" (dernière connue) plutôt que P exact
-        # à `assim_date` (non stockée jour par jour) — cf. docstring du module.
-        P = self.kalman.P_state_[hour]
-        H_t = contrib
-        var_log = float(H_t @ P @ H_t.T + self.kalman.V_[hour])
-        se_log = np.sqrt(max(var_log, 0.0))
-        kalman_lo = float(np.expm1(pred_log - 1.96 * se_log))
-        kalman_hi = float(np.expm1(pred_log + 1.96 * se_log))
-
-        # décomposition (espace log, additive) par bloc + intercept
-        decomposition_log = {"Fond de roulement (beta0)": self.kalman.intercept_[hour]}
-        for block_name, cols in BLOCKS.items():
-            idx = [self.state_cols.index(c) for c in cols]
-            decomposition_log[block_name] = float(np.sum(contrib[idx] * state[idx]))
+        preds: dict[str, ModelPred] = {}
+        kalman_pred, decomposition_log = self._kalman_pred(row, hour, day_j)
+        preds["kalman"] = kalman_pred
+        if self.has_ols:
+            preds["ols"] = self._static_pred(self.ols.beta_[hour], self._ols_mse[hour], x_all)
+        preds["sure"] = self._static_pred(self.sure.beta_[hour], self._sure_mse[hour], x_all)
 
         actual = None
         ts_candidates = self.full_per_hour[hour]
@@ -197,11 +238,7 @@ class ModelStore:
             actual = float(actual_val) if pd.notna(actual_val) else None
 
         return HourPrediction(
-            date=target_date, hour=hour,
-            kalman=kalman_pred, kalman_lo=kalman_lo, kalman_hi=kalman_hi,
-            ols=ols_pred, ols_lo=ols_lo, ols_hi=ols_hi,
-            sure=sure_pred, sure_lo=sure_lo, sure_hi=sure_hi,
-            actual=actual, decomposition_log=decomposition_log,
+            date=target_date, hour=hour, actual=actual, preds=preds, decomposition_log=decomposition_log
         )
 
     def forecast_horizon(self, day_j: dt.date, temp_delta: float = 0.0) -> list[HourPrediction]:
@@ -219,9 +256,9 @@ class ModelStore:
         return results
 
     def rolling_performance(self, end_date: dt.date, window_days: int = 30) -> pd.DataFrame:
-        """Pour chaque jour d du fenêtre [end_date-window, end_date], la prévision
-        des 24h de d telle qu'elle aurait été faite la veille à 17h (J=d-1),
-        comparée au réel. Retourne un DataFrame long (date, modele, rmse, mape)."""
+        """Pour chaque jour d de [end_date-window, end_date], la prévision des 24h
+        de d telle qu'elle aurait été faite la veille à 17h, comparée au réel.
+        Retourne un DataFrame long (date, modele, rmse, mape) pour chaque modèle."""
         from models.metrics import mape as mape_fn
         from models.metrics import rmse as rmse_fn
 
@@ -234,10 +271,10 @@ class ModelStore:
             if not preds:
                 continue
             actual = pd.Series([p.actual for p in preds])
-            for model_name, attr in (("Kalman", "kalman"), ("OLS", "ols"), ("SURE", "sure")):
-                pred_series = pd.Series([getattr(p, attr) for p in preds])
+            for key, label in self.models:
+                pred_series = pd.Series([p.preds[key].value for p in preds])
                 rows.append({
-                    "date": d, "modele": model_name,
+                    "date": d, "modele": label,
                     "rmse": rmse_fn(actual, pred_series), "mape": mape_fn(actual, pred_series),
                 })
         return pd.DataFrame(rows)

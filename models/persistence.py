@@ -29,6 +29,17 @@ KALMAN_TRAIN_START = "2018-01-01"  # Kalman : historique complet, inchangé
 BACKTEST_TEST_START = "2025-01-01"
 BACKTEST_TEST_END = "2026-01-01"
 
+# --- Modèles régionaux (Étape C/D) -----------------------------------------
+# Un jeu par région et par usage. Nom de fichier :
+#   data/models/regional/region<code>_<model>_<set>.pkl
+# set ∈ {backtest (hold-out réservé, pour les métriques/dashboard de rejeu),
+#        production (entraîné jusqu'à la dernière donnée, pour la prévision)}.
+REGIONAL_SUBDIR = "regional"
+
+
+def regional_artifact_name(region_code: int, model: str, artifact_set: str = "backtest") -> str:
+    return f"{REGIONAL_SUBDIR}/region{region_code}_{model}_{artifact_set}"
+
 
 def _strip_statsmodels_results(obj: Any) -> None:
     """Retire les données d'entraînement (exog/endog) des objets
