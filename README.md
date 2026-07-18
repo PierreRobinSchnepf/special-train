@@ -265,17 +265,64 @@ en cache. D'où `HourlyOLSModel.beta_`/`.mse_resid_`/`.rsquared_` et
 chargement est extrait en attributs simples (numpy/dict) **pendant**
 `fit()`, jamais relu sur l'objet `statsmodels` après coup.
 
+## Prévision région par région (12 régions gazières)
+
+Extension du modèle national à une prévision **par région**. La cible nationale
+`consommation-quotidienne-brute` n'étant pas ventilée par région, la
+consommation régionale est reconstituée en sommant deux datasets ODRÉ régionaux
+(les mêmes que le pipeline réel, mais en **gardant** la maille région au lieu de
+tout sommer) : `conso-journa-industriel-grtgazterega` (industriel) +
+`courbe-de-charge-eldgrd-regional-grtgaz-terega` (distribution publique). Somme
+des 12 régions ≈ total national à ~0,03 % (2024+).
+
+**Contrainte de données documentée** (`src/regional_gas.py`) : avant **juin
+2023**, le profil horaire intra-journalier de ces datasets est déphasé (~+6h ;
+pic distribution à 12h UTC en 2018-2022 vs 06h UTC en 2024+), alors que les
+totaux journaliers restent corrects. Les modèles horaires régionaux ne
+s'entraînent donc que sur l'historique propre `>= gas_regional.hourly_valid_start`
+(2023-06-01, `config.yaml`). Un artefact récurrent au samedi 01:00 UTC précédant
+la bascule DST de mars (valeurs aberrantes 0→~100 MW) est filtré par un critère
+de **chute isolée** (`_mask_isolated_dips` : une heure < 0,5× min(voisins) est un
+collapse impossible vu l'inertie thermique) plutôt qu'un seuil de magnitude (le
+vrai minimum d'été frôle l'anomalie). Température par région : moyenne pondérée
+population des stations Météo-France de la région (`src/regional_meteo.py`,
+`region_code` en config ; dept 45/Orléans ajouté pour couvrir Centre-Val de Loire).
+
+```bash
+# 1. Ingestion gaz régional (2 datasets ODRÉ, chunké par année)
+python fetch_data.py --only gas_regional
+# 2. Dataset régional : 12 parquet mono-région, même schéma que le national
+python build_regional_dataset.py
+# 3. Modèles par région (SURE + Kalman ; OLS exclu), 2 jeux backtest+production
+python train_regional_models.py
+```
+
+`train_regional_models.py` réutilise **sans les modifier** `HourlySUREModel` et
+`HourlyKalmanSURModel`, en boucle sur les 12 régions. Deux jeux d'artefacts par
+région dans `data/models/regional/region<code>_<model>_<set>.pkl`
+(`set ∈ {backtest, production}`, cf. `regional_artifact_name`). Fenêtres dans
+`config.yaml § regional_models` : train 2023-06→2025-07, test 2025-07→2026-07.
+Résultats (test) : le Kalman bat le SURE dans les 12 régions (RMSE −16 % en
+moyenne) ; somme des 12 prévisions vs national : Kalman MAPE 7,6 %, SURE 12,0 %.
+Métriques détaillées dans `data/processed/regional/metrics_regional.json`.
+
 ## Dashboard (`dashboard/`)
 
 ```bash
 streamlit run dashboard/app.py
 ```
 
-4 onglets : **Forecast** (courbe + IC + décomposition + what-if météo),
+Un sélecteur **Périmètre** (barre latérale) bascule entre le **National** et
+chacune des **12 régions** — le même `ModelStore` sert les deux (paramétré par
+`region_code`), et les tracés sont pilotés par `store.models`, donc ajouter ou
+retirer un modèle ne touche qu'un endroit.
+
+Onglets : **Forecast** (courbe + IC + décomposition + what-if météo),
 **Benchmark** (prévu vs réel sur un jour choisi), **Suivi de performance**
-(RMSE/MAPE glissants sur fenêtre configurable), **Pipeline réel** (cf.
-ci-dessous). Les 3 premiers rejouent l'année de test 2025 (backtest — tout
-est déjà connu). Le detail du calcul jour J → J+1 (17h→23h+1) est dans
+(RMSE/MAPE glissants sur fenêtre configurable), et **Pipeline réel** (national
+uniquement, cf. ci-dessous). Les 3 premiers rejouent l'année de test (backtest —
+tout est déjà connu) : 2025 au national, 2025-07→2026-06 au régional. Le détail
+du calcul jour J → J+1 (17h→23h+1) est dans
 `dashboard/services/model_store.py`.
 
 ## Pipeline réel (`pipeline/`)

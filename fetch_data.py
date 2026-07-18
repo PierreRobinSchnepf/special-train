@@ -18,6 +18,7 @@ import sys
 
 from src.config import load_config, resolve_path
 from src.http_utils import download, get_json
+from src.regional_gas import fetch_regional_gas
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fetch_data")
 
-SOURCES = ["gas", "meteo", "holidays", "school_holidays"]
+SOURCES = ["gas", "gas_regional", "meteo", "holidays", "school_holidays"]
 
 
 def fetch_gas(config: dict, force: bool = False, refresh_current_year: bool = True) -> None:
@@ -167,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if "gas" in args.only:
         fetch_gas(config, force=args.force, refresh_current_year=not args.no_refresh_current_year)
+    if "gas_regional" in args.only:
+        fetch_regional_gas(config, force=args.force, refresh_current_year=not args.no_refresh_current_year)
     if "meteo" in args.only:
         fetch_meteo(config, force=args.force)
     if "holidays" in args.only:

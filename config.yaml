@@ -46,6 +46,69 @@ gas:
   perimeter: "France continentale (réseaux GRTgaz + Terega)"
 
 # ---------------------------------------------------------------------------
+# Source 1bis : consommation gaz RÉGIONALE (cible du modèle région par région)
+# ---------------------------------------------------------------------------
+# Le dataset national `consommation-quotidienne-brute` (ci-dessus) n'a pas de
+# ventilation régionale. La consommation par région se reconstitue en sommant
+# deux datasets ODRÉ régionaux (mêmes que pipeline/gas_freshness.py, mais ici
+# on GARDE la maille région au lieu de sommer sur tout le pays) :
+#   - industriel  : `conso-journa-industriel-grtgazterega`      (2018-01-01 ->)
+#   - distribution : `courbe-de-charge-eldgrd-regional-grtgaz-terega` (2018-06-01 ->)
+# Vérifié empiriquement le 2026-07-17 : les deux couvrent les mêmes 12 régions
+# métropolitaines raccordées au réseau (toutes sauf la Corse, non raccordée au
+# gaz naturel), 2 opérateurs (NaTran ex-GRTgaz + Teréga), plusieurs secteurs.
+# Format LARGE (une colonne par heure), heure LOCALE Europe/Paris (pas UTC) —
+# conversion obligatoire, cf. src/regional_gas.py. Retard de publication
+# ~15-20 j (vs ~45-50 j pour l'agrégat national).
+gas_regional:
+  industrial_dataset_id: "conso-journa-industriel-grtgazterega"
+  distribution_dataset_id: "courbe-de-charge-eldgrd-regional-grtgaz-terega"
+  export_url_template: "https://odre.opendatasoft.com/api/v2/catalog/datasets/{dataset_id}/exports/csv"
+  date_field: "date"
+  region_code_field: "code_region"
+  # Le champ industriel démarre en janvier 2018, la distribution en juin 2018 ;
+  # une région n'a de total complet (indus + distrib) qu'à partir de la plus
+  # tardive des deux. Documenté ici plutôt que codé en dur.
+  distribution_start: "2018-06-01"
+  # Début de l'historique horaire NATIF FIABLE. Découverte empirique (2026-07-18,
+  # cf. src/regional_gas.py) : avant juin 2023 le profil intra-journalier des
+  # données régionales est déphasé (~+6h sur la distribution ; pic à 12h UTC en
+  # 2018-2022 vs 06h UTC en 2024+), corrompant la forme horaire — alors que les
+  # totaux journaliers restent corrects. Bascule de convention nette à 2023-06 :
+  # Σrégions vs national passe de ~11-19% (avant) à 0,01-0,5% (après) d'écart
+  # horaire médian. Les modèles régionaux HORAIRES ne s'entraînent donc que sur
+  # >= cette date (décision utilisateur : ne pas tenter de corriger le pré-2023).
+  hourly_valid_start: "2023-06-01"
+  # Nettoyage des "chutes isolées" : la source encode un artefact récurrent au
+  # samedi 01:00 UTC précédant la bascule DST de mars (valeurs 0 à ~100 MW alors
+  # que la région tourne à des milliers de MW). Un simple seuil de magnitude est
+  # dangereux (le vrai minimum d'été d'Occitanie ~104 MW frôle l'anomalie
+  # ~100 MW) ; on filtre donc sur le CARACTÈRE ISOLÉ : toute heure < dip_fraction
+  # x min(voisins) est un collapse d'une heure impossible (inertie thermique) ->
+  # NaN. Marge énorme : anomalies ~6% des voisins, vrais creux ~90%.
+  dip_fraction: 0.5
+  raw_subdir: "gas_regional"
+  # Le dataset distribution exporte de gros CSV annuels (plusieurs Mo, serveur
+  # ODRÉ lent) qui dépassent le timeout HTTP par défaut de 60s -> timeout dédié.
+  request_timeout: 300
+  # Table de correspondance code INSEE -> nom canonique (les noms bruts des CSV
+  # varient : "Grand-Est"/"Grand Est", "Ile-de-France"/"Île-de-France"...).
+  # On indexe sur le code_region numérique, stable, jamais sur le libellé brut.
+  regions:
+    11: "Île-de-France"
+    24: "Centre-Val de Loire"
+    27: "Bourgogne-Franche-Comté"
+    28: "Normandie"
+    32: "Hauts-de-France"
+    44: "Grand Est"
+    52: "Pays de la Loire"
+    53: "Bretagne"
+    75: "Nouvelle-Aquitaine"
+    76: "Occitanie"
+    84: "Auvergne-Rhône-Alpes"
+    93: "Provence-Alpes-Côte d'Azur"
+
+# ---------------------------------------------------------------------------
 # Source 2 : température horaire (Météo-France, données climatologiques
 # de base horaires, fichiers par département)
 # ---------------------------------------------------------------------------
@@ -63,50 +126,78 @@ meteo:
   # grandeur INSEE ~2021, PAS une zone officielle GRTgaz — cette dernière
   # n'est pas publiée en open data). Choix documenté explicitement plutôt
   # que supposé : voir data_dictionary.md § Température nationale.
+  #
+  # `region_code` (INSEE) rattache chaque département à sa région administrative,
+  # pour construire une température PAR RÉGION (moyenne pondérée population des
+  # stations de la région) en plus de la température nationale. Les 12 régions
+  # gazières (cf. gas_regional) sont toutes couvertes par >= 1 station. Ajout au
+  # 2026-07-18 : dept 45 (Loiret / Orléans) — le panier national d'origine ne
+  # contenait aucune station en Centre-Val de Loire (24) ; on prend la préfecture
+  # de région. La température nationale reste inchangée (les poids nationaux ne
+  # dépendent pas de region_code), seul le 45 s'y ajoute marginalement.
   stations:
     - department: "75"
+      region_code: 11
       region_label: "Paris / Île-de-France"
       weight: 2133000
+    - department: "45"
+      region_code: 24
+      region_label: "Loiret (Orléans) — Centre-Val de Loire"
+      weight: 680000
     - department: "59"
+      region_code: 32
       region_label: "Nord (Lille)"
       weight: 2604000
     - department: "69"
+      region_code: 84
       region_label: "Rhône (Lyon)"
       weight: 1876000
     - department: "13"
+      region_code: 93
       region_label: "Bouches-du-Rhône (Marseille)"
       weight: 2043000
     - department: "31"
+      region_code: 76
       region_label: "Haute-Garonne (Toulouse)"
       weight: 1400000
     - department: "33"
+      region_code: 75
       region_label: "Gironde (Bordeaux)"
       weight: 1633000
     - department: "44"
+      region_code: 52
       region_label: "Loire-Atlantique (Nantes)"
       weight: 1442000
     - department: "67"
+      region_code: 44
       region_label: "Bas-Rhin (Strasbourg)"
       weight: 1132000
     - department: "35"
+      region_code: 53
       region_label: "Ille-et-Vilaine (Rennes)"
       weight: 1088000
     - department: "38"
+      region_code: 84
       region_label: "Isère (Grenoble)"
       weight: 1271000
     - department: "76"
+      region_code: 28
       region_label: "Seine-Maritime (Rouen)"
       weight: 1255000
     - department: "06"
+      region_code: 93
       region_label: "Alpes-Maritimes (Nice)"
       weight: 1094000
     - department: "21"
+      region_code: 27
       region_label: "Côte-d'Or (Dijon)"
       weight: 532000
     - department: "63"
+      region_code: 84
       region_label: "Puy-de-Dôme (Clermont-Ferrand)"
       weight: 662000
     - department: "51"
+      region_code: 44
       region_label: "Marne (Reims)"
       weight: 566000
   min_period_start_year: 2010  # ne télécharge que les archives décennales >= cette année
@@ -167,6 +258,27 @@ calendar:
   # dans la même ligne du Tableau 1) : les deux colonnes sont conservées
   # séparément pour laisser le modèle estimer un effet différentiel.
   off_peak_definition: "holiday OR any_school_zone_on_break OR end_of_year"
+
+# ---------------------------------------------------------------------------
+# Modèles RÉGIONAUX (Étape C : un jeu de modèles par région)
+# ---------------------------------------------------------------------------
+# Fenêtres d'entraînement/test spécifiques aux modèles régionaux. Différentes du
+# national (constantes dans models/persistence.py) car l'historique horaire
+# régional fiable ne commence qu'à gas_regional.hourly_valid_start (cf.
+# [[regional-gas-hourly-phase-shift]]) : ~3 hivers seulement.
+regional_models:
+  # Tous les modèles régionaux démarrent au début de l'historique propre (pas
+  # de décalage 2018/2020 comme au national — rien d'exploitable avant).
+  train_start: "2023-06-01"
+  # Hold-out = dernière année complète (chauffe 2025-26 incluse). Train =
+  # [train_start, test_start) = 2023-06 -> 2025-07 (~2 hivers : 23-24, 24-25).
+  test_start: "2025-07-01"
+  test_end: "2026-07-01"
+  # OLS volontairement EXCLU (jugé sans valeur ajoutée vs SURE). On n'entraîne
+  # que le SURE (statique) et le Kalman-SUR (ajustement dynamique).
+  models: ["sure", "kalman"]
+  artifacts_subdir: "regional"        # -> data/models/regional/region_<code>_<model>.pkl
+  dataset_subdir: "regional"           # <- data/processed/regional/dataset_region_<code>.parquet
 
 output:
   raw_dir: "data/raw"
