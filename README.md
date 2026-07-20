@@ -11,9 +11,7 @@
 
 [**🔗 Try the live dashboard →**](https://gas-hourly-forecast.streamlit.app/)
 
-<img src="assets/kalman-winter-window.png" width="760" alt="Kalman vs frozen SUR vs actual consumption — two winter weeks of the 2025 test">
-
-*Two January weeks of the held-out 2025 test: the Kalman-adjusted SUR (orange) tracks actual consumption (black) where the static SUR (blue) drifts.*
+<img src="assets/demo.gif" width="720" alt="Dashboard demo — map of France, forecasts and live pipeline">
 
 </div>
 
@@ -151,10 +149,10 @@ estimated independently. This is the naive baseline: no information is shared ac
 The 24 equations are *not* unrelated: an unobserved daily shock (fine-grained weather, an unusual day) hits all hours of the same day at once, so the residuals are contemporaneously correlated:
 
 $$
-\operatorname{Cov}(\varepsilon_{t,h},\, \varepsilon_{t,h'}) = \Sigma_{hh'} \neq 0
+\mathrm{Cov}(\varepsilon_{t,h},\, \varepsilon_{t,h'}) = \Sigma_{hh'} \neq 0
 $$
 
-Zellner's FGLS estimator exploits this. Stage 1 runs 24 OLS regressions and estimates $\widehat\Sigma = \frac{1}{T}\sum_t \widehat{\boldsymbol\varepsilon}_t \widehat{\boldsymbol\varepsilon}_t^{\top}$ (24×24). Stage 2 whitens the stacked system with $P = \operatorname{chol}(\widehat\Sigma)^{-1}$ and re-estimates:
+Zellner's FGLS estimator exploits this. Stage 1 runs 24 OLS regressions and estimates $\widehat\Sigma = \frac{1}{T}\sum_t \widehat{\boldsymbol\varepsilon}_t \widehat{\boldsymbol\varepsilon}_t^{\top}$ (24×24). Stage 2 whitens the stacked system with $P = \mathrm{chol}(\widehat\Sigma)^{-1}$ and re-estimates:
 
 $$
 \widehat{\boldsymbol\beta}^{\text{SURE}} = \big(X^{\top}(\widehat\Sigma^{-1} \otimes I_T)X\big)^{-1} X^{\top}(\widehat\Sigma^{-1} \otimes I_T)\,\mathbf{y}
@@ -187,6 +185,10 @@ $$
 $$
 
 where $H_{t,j} = \beta^{\text{SUR}}_{h,j} x_{t,h,j}$ is the SUR structural contribution — this anchoring is what makes the state interpretable as "how far today's effect is from its historical average" (1 = no departure). The standard Kalman recursion (predict, innovate, update with gain $K_t = P_{t|t-1}H_t^{\top}S_t^{-1}$) yields honest one-step-ahead forecasts and, as a by-product, a 95% CI from the predictive variance $S_t$. The observation noise $V_h$ is set to the SUR's log-space residual variance for hour $h$; the intercept stays fixed (per the specification), and the process noise is $W = 10^{-4} I$.
+
+The result on the held-out 2025 test — the Kalman-adjusted SUR (orange) tracks actual consumption (black) where the frozen SUR (blue) drifts:
+
+<p align="center"><img src="assets/kalman-winter-window.png" width="760" alt="Kalman vs frozen SUR vs actual consumption — two winter weeks of the 2025 test"></p>
 
 The filter pays off exactly where the static model fails — the cumulative error gap widens through the whole test year:
 
