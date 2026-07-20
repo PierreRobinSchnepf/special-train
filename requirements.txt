@@ -20,3 +20,5 @@ scipy>=1.11
 # dashboard
 streamlit>=1.50
 plotly>=5.24
+# déploiement : lecture des artefacts depuis S3/MinIO (SSP Cloud)
+boto3>=1.34

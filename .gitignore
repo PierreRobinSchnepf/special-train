@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Secrets Streamlit (endpoint + clés S3, mot de passe admin) — jamais commité
+.streamlit/secrets.toml

@@ -23,10 +23,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard.services.auth import admin_gate
 from dashboard.services.gas_refresh import check_freshness, load_tracking, run_refresh
 from dashboard.services.map_data import load_geojson, regional_error_table
 from dashboard.services.model_store import BLOCKS, ModelStore
 from src.config import load_config
+from src.storage import admin_unlocked, download_runtime_artifacts
 
 # ---------------------------------------------------------------------------
 # Palette (cf. skill dataviz — thème catégoriel + diverging validés)
@@ -61,6 +63,17 @@ BLOCK_COLORS = {
 }
 
 st.set_page_config(page_title="Prévision gaz — France & régions", layout="wide", page_icon="🔥")
+
+
+@st.cache_resource(show_spinner="Téléchargement des données depuis le stockage…")
+def _bootstrap_artifacts() -> dict:
+    """En déploiement (config S3 présente), synchronise les artefacts runtime
+    depuis S3 vers le disque local éphémère. No-op en local. Caché : ne tourne
+    qu'une fois par conteneur."""
+    return download_runtime_artifacts()
+
+
+_bootstrap_artifacts()
 
 _cfg = load_config()
 _region_names = {int(k): v for k, v in _cfg["gas_regional"]["regions"].items()}
@@ -135,9 +148,16 @@ with st.sidebar:
     window_days = st.slider("Fenêtre de suivi (jours)", 7, 90, 30, 7)
 
     st.divider()
+    # Verrou admin : en cloud, l'actualisation (téléchargement lourd + écriture)
+    # est masquée tant que le mot de passe admin n'est pas saisi.
+    _is_admin = admin_gate()
     st.subheader("🔄 Données gaz")
     st.caption("Les données régionales ODRÉ se publient ~tous les 15-20 jours.")
-    _do_refresh = st.button("Vérifier & actualiser", width="stretch")
+    if _is_admin:
+        _do_refresh = st.button("Vérifier & actualiser", width="stretch")
+    else:
+        _do_refresh = False
+        st.caption("🔒 Actualisation réservée à l'admin.")
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +460,11 @@ if real_tab is not None:
             "sources externes à l'instant présent : ODRÉ (reconstruction régionale) pour rattraper l'état "
             "du modèle jusqu'au jour G (~15-20 j en arrière), puis Open-Meteo pour la météo à venir."
         )
-        if st.button("🚀 Lancer une prévision réelle maintenant (30-60s)"):
+        _can_run_real = admin_unlocked()
+        if not _can_run_real:
+            st.caption("🔒 Le déclenchement d'une prévision réelle (appels externes live) "
+                       "est réservé à l'admin. Les prévisions déjà enregistrées restent visibles.")
+        if _can_run_real and st.button("🚀 Lancer une prévision réelle maintenant (30-60s)"):
             with st.spinner("Récupération ODRÉ régional + Open-Meteo + calcul…"):
                 from pipeline.real_forecast import run_real_forecast
                 from pipeline.tracking_store import save_forecast
