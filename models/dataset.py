@@ -1,13 +1,12 @@
-"""Préparation du panel jour x heure utilisé par les deux modèles benchmark.
+"""Preparation of the day x hour panel used by the benchmark models.
 
-Les deux modèles (OLS et SURE) reposent sur la même décomposition en 24
-équations horaires : pour chaque heure locale h ∈ [0,23], une équation prédit
-`y_gas_mw` à partir des prédicteurs du Tableau 1 évalués à cette heure-là.
-Le panel est rendu équilibré (mêmes jours pour les 24 équations) car
-l'estimation SURE a besoin d'observations contemporaines alignées pour
-calculer la covariance inter-équations — les rares jours de transition
-DST (heure locale manquante ou dupliquée, ~2/an) sont exclus plutôt que
-bricolés.
+Both models (OLS and SURE) rely on the same decomposition into 24 hourly
+equations: for each local hour h ∈ [0,23], one equation predicts `y_gas_mw`
+from the Table 1 predictors evaluated at that hour. The panel is balanced
+(same days across the 24 equations) because the SURE estimation needs aligned
+contemporaneous observations to compute the cross-equation covariance — the
+few DST-transition days (missing or duplicated local hour, ~2/year) are
+excluded rather than patched.
 """
 from __future__ import annotations
 
@@ -21,9 +20,8 @@ CALENDAR_TZ = "Europe/Paris"
 
 TARGET_COLUMN = "y_gas_mw"
 
-# Prédicteurs du Tableau 1 uniquement (temp_raw_c est exclue : c'est une
-# variable brute intermédiaire conservée pour audit, pas une variable du
-# modèle — voir data_dictionary.md).
+# Table 1 predictors only (temp_raw_c is excluded: it is an intermediate raw
+# variable kept for audit, not a model variable — see docs/data-dictionary.md).
 _THERMAL = ["temp_smo", "X1_heating", "X2_smo_heating"]
 _FOURIER = [
     f"{trig}{s}_{grp}"
@@ -46,13 +44,13 @@ def build_hourly_equations(
     predictor_cols: list[str] = PREDICTOR_COLUMNS,
     target_col: str = TARGET_COLUMN,
 ) -> dict[int, pd.DataFrame]:
-    """Découpe `df` (index horaire UTC) en 24 DataFrames (un par heure locale),
-    indexés par date locale, et équilibrés (mêmes dates pour les 24 heures).
+    """Split `df` (UTC hourly index) into 24 DataFrames (one per local hour),
+    indexed by local date, and balanced (same dates across the 24 hours).
 
-    Chaque DataFrame retourné a pour colonnes [target_col, *predictor_cols,
-    "utc_ts"] — `utc_ts` porte l'horodatage UTC d'origine, nécessaire pour
-    replacer les prédictions sur l'index temporel complet sans avoir à
-    reconstruire une date locale (ambiguë aux transitions DST).
+    Each returned DataFrame has columns [target_col, *predictor_cols,
+    "utc_ts"] — `utc_ts` carries the original UTC timestamp, needed to place
+    predictions back on the full time index without reconstructing a local
+    date (ambiguous at DST transitions).
     """
     local = df.index.tz_convert(CALENDAR_TZ)
     work = df[[target_col, *predictor_cols]].copy()
@@ -61,8 +59,8 @@ def build_hourly_equations(
     work["utc_ts"] = df.index
 
     work = work.dropna(subset=[target_col, *predictor_cols])
-    # Jour de bascule automne (heure locale dupliquée) : on garde la première
-    # occurrence (avant le changement d'heure) par convention documentée.
+    # Autumn switch day (duplicated local hour): keep the first occurrence
+    # (before the clock change) by documented convention.
     work = work.drop_duplicates(subset=["local_date", "local_hour"], keep="first")
 
     per_hour = {
@@ -79,9 +77,8 @@ def build_hourly_equations(
     per_hour = {h: per_hour[h].loc[common_dates] for h in range(24)}
     n_dropped = {h: n_before[h] - len(common_dates) for h in range(24) if n_before[h] != len(common_dates)}
     if n_dropped:
-        total_candidate_days = len(set().union(*(set(per_hour[h].index) for h in range(24))) | set(n_before))
-        print(f"build_hourly_equations: panel équilibré sur {len(common_dates)} jours "
-              f"(jours exclus par heure pour déséquilibre : {n_dropped})")
+        print(f"build_hourly_equations: panel balanced over {len(common_dates)} days "
+              f"(days dropped per hour for imbalance: {n_dropped})")
 
     return per_hour
 
@@ -92,19 +89,19 @@ def split_train_test(
     test_end: str = "2026-01-01",
     train_start: str | None = None,
 ) -> tuple[dict[int, pd.DataFrame], dict[int, pd.DataFrame]]:
-    """Train = tout ce qui précède `test_start` (et suit `train_start` si
-    fourni). Test = [test_start, test_end).
+    """Train = everything before `test_start` (and after `train_start` when
+    given). Test = [test_start, test_end).
 
-    Les données postérieures à `test_end` (ex. le reliquat partiel de la
-    dernière année du dataset) sont volontairement exclues des deux
-    ensembles : elles ne constituent ni un historique d'entraînement propre
-    (postérieures à la période de test) ni une période de test complète.
+    Data after `test_end` (e.g. the partial remainder of the dataset's last
+    year) is deliberately excluded from both sets: it is neither a clean
+    training history (it postdates the test period) nor a complete test
+    period.
 
-    `train_start` permet d'exclure les données trop anciennes (ex. OLS/SURE
-    entraînés seulement depuis 2020 — cf. `models/persistence.py`). Passer
-    `test_start == test_end` donne un test vide et un train couvrant tout
-    l'historique jusqu'à cette date (utile pour les modèles "production" qui
-    n'ont pas besoin d'un jeu de test réservé).
+    `train_start` excludes data that is too old (e.g. OLS/SURE trained only
+    from 2020 on — see `models/persistence.py`). Passing
+    `test_start == test_end` yields an empty test set and a train set covering
+    the whole history up to that date (useful for "production" models that
+    need no held-out test set).
     """
     test_start_d = pd.Timestamp(test_start).date()
     test_end_d = pd.Timestamp(test_end).date()
@@ -122,5 +119,5 @@ def split_train_test(
 
 
 def target_series(per_hour: dict[int, pd.DataFrame], target_col: str = TARGET_COLUMN) -> dict[int, pd.Series]:
-    """Cible indexée par `utc_ts`, dans le même format que les prédictions des modèles."""
+    """Target indexed by `utc_ts`, in the same format as model predictions."""
     return {h: frame.set_index("utc_ts")[target_col] for h, frame in per_hour.items()}

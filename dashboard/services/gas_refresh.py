@@ -1,18 +1,17 @@
-"""Actualisation des données gaz régionales + suivi de qualité dans le temps.
+"""Regional gas data refresh + quality tracking over time.
 
-Les deux datasets ODRÉ régionaux se mettent à jour ~tous les 15-20 jours. Ce
-module :
-  1. vérifie s'il existe des données plus récentes en ligne que celles déjà
-     construites localement (`check_freshness`) ;
-  2. si oui, ré-ingère, reconstruit le dataset régional et ré-entraîne les
-     modèles backtest (`run_refresh`) — c'est-à-dire "réentraîne en rajoutant la
-     dernière performance" ;
-  3. journalise à chaque actualisation la qualité courante des modèles
-     (`append_tracking` / `load_tracking`) — un historique MAPE par région dans
-     le temps, le "tracking de qualité de prédiction".
+Both regional ODRÉ datasets update every ~15-20 days. This module:
+  1. checks whether data newer than what was built locally is available
+     online (`check_freshness`);
+  2. if so, re-ingests, rebuilds the regional dataset and retrains the
+     backtest models (`run_refresh`) — i.e. "retrain including the latest
+     performance";
+  3. logs the models' current quality at every refresh
+     (`append_tracking` / `load_tracking`) — a per-region MAPE history over
+     time, the "prediction quality tracking".
 
-Le ré-entraînement est volontairement synchrone (l'appelant l'enveloppe dans un
-`st.status`) : ingestion + reconstruction météo + fit ~ quelques minutes.
+The retraining is deliberately synchronous (the caller wraps it in a
+`st.status`): ingestion + weather rebuild + fit ~ a few minutes.
 """
 from __future__ import annotations
 
@@ -33,8 +32,8 @@ def _regional_dir(config: dict) -> Path:
 
 
 def dataset_last_day(config: dict) -> dt.date | None:
-    """Dernier jour couvert par le dataset régional déjà construit (via une
-    région de référence). None si le dataset n'existe pas encore."""
+    """Last day covered by the already-built regional dataset (through a
+    reference region). None when the dataset does not exist yet."""
     ref = _regional_dir(config) / "dataset_region_11.parquet"
     if not ref.exists():
         return None
@@ -43,7 +42,7 @@ def dataset_last_day(config: dict) -> dt.date | None:
 
 
 def check_freshness(config: dict) -> dict:
-    """Compare la dernière donnée en ligne au dernier jour construit localement."""
+    """Compare the latest online data with the last locally built day."""
     source_day = latest_available_source_day(config)
     local_day = dataset_last_day(config)
     has_new = bool(source_day and local_day and source_day > local_day)
@@ -52,33 +51,32 @@ def check_freshness(config: dict) -> dict:
 
 
 def run_refresh(config: dict, log: Callable[[str], None]) -> dict:
-    """Ré-ingère, reconstruit et ré-entraîne (jeu backtest). Retourne un résumé.
-    `log` reçoit un message par étape (branché sur st.status côté dashboard)."""
-    # Imports différés : évitent de charger tout le pipeline au démarrage du dashboard.
-    import build_regional_dataset
-    import train_regional_models
+    """Re-ingest, rebuild and retrain (backtest set). Returns a summary.
+    `log` receives one message per step (wired to st.status dashboard-side)."""
+    # Deferred imports: avoid loading the whole pipeline at dashboard startup.
+    from scripts import build_regional_dataset, train_regional_models
     from src.regional_gas import fetch_regional_gas
 
     before = dataset_last_day(config)
 
-    log("Téléchargement des dernières données ODRÉ (industriel + distribution)…")
+    log("Downloading the latest ODRÉ data (industrial + distribution)…")
     fetch_regional_gas(config, refresh_current_year=True)
 
-    log("Reconstruction du dataset régional (12 régions)…")
+    log("Rebuilding the regional dataset (12 regions)…")
     build_regional_dataset.main([])
 
-    log("Ré-entraînement des modèles backtest (SURE + Kalman) par région…")
+    log("Retraining the backtest models (SURE + Kalman) per region…")
     train_regional_models.main(["--set", "backtest"])
 
     after = dataset_last_day(config)
-    log("Mise à jour du suivi de qualité…")
+    log("Updating the quality tracking…")
     entry = append_tracking(config, before, after)
-    log("Terminé.")
+    log("Done.")
     return {"before": before, "after": after, "tracking_entry": entry}
 
 
 # ---------------------------------------------------------------------------
-# Suivi de qualité dans le temps (un point par actualisation)
+# Quality tracking over time (one point per refresh)
 # ---------------------------------------------------------------------------
 
 def _tracking_path(config: dict) -> Path:
@@ -86,7 +84,7 @@ def _tracking_path(config: dict) -> Path:
 
 
 def _current_quality(config: dict) -> dict:
-    """MAPE Kalman par région (jeu backtest) tel qu'il vient d'être recalculé."""
+    """Kalman MAPE per region (backtest set) as just recomputed."""
     from dashboard.services.map_data import regional_error_table
 
     tbl = regional_error_table(config)

@@ -1,8 +1,8 @@
-"""Benchmark 1 : 24 équations OLS indépendantes (une par heure locale).
+"""Benchmark 1: 24 independent OLS equations (one per local hour).
 
-Chaque heure h a ses propres coefficients, estimés séparément par
-`statsmodels.OLS`, sans partage d'information entre équations. C'est la
-référence naïve à laquelle comparer le gain (ou non) du système SURE.
+Each hour h has its own coefficients, estimated separately with
+`statsmodels.OLS`, sharing no information across equations. This is the naive
+baseline against which the SURE system's gain (or lack thereof) is measured.
 """
 from __future__ import annotations
 
@@ -17,15 +17,14 @@ class HourlyOLSModel:
     def __init__(self, predictor_cols: list[str] = PREDICTOR_COLUMNS):
         self.predictor_cols = list(predictor_cols)
         self.results_: dict[int, sm.regression.linear_model.RegressionResultsWrapper] = {}
-        # Statistiques/coefficients dérivés, extraits à l'entraînement plutôt
-        # que relus plus tard sur `results_` : `models.persistence` retire
-        # les données brutes (exog/endog) des résultats avant sauvegarde
-        # pour limiter la taille des artefacts, ce qui casse les propriétés
-        # calculées à la demande (mse_resid, rsquared) ET fait perdre le
-        # nom des colonnes de `.params` après un aller-retour pickle (il
-        # retombe sur un index entier positionnel) — vérifié empiriquement.
-        # `beta_` est donc la seule source utilisée pour prédire, jamais
-        # `results_[h].params` directement.
+        # Derived statistics/coefficients, extracted at fit time rather than
+        # read later from `results_`: `models.persistence` strips the raw data
+        # (exog/endog) from the results before saving to keep artifacts small,
+        # which breaks lazily computed properties (mse_resid, rsquared) AND
+        # loses the column names of `.params` after a pickle round-trip (it
+        # falls back to a positional integer index) — verified empirically.
+        # `beta_` is therefore the only source used for prediction, never
+        # `results_[h].params` directly.
         self.beta_: dict[int, np.ndarray] = {}
         self.mse_resid_: dict[int, float] = {}
         self.rsquared_: dict[int, float] = {}
@@ -50,7 +49,7 @@ class HourlyOLSModel:
         return preds
 
     def coefficients(self) -> pd.DataFrame:
-        """Coefficients (heures x prédicteurs), pour inspection."""
+        """Coefficients (hours x predictors), for inspection."""
         return pd.DataFrame(self.beta_, index=self.predictor_cols).T.sort_index()
 
     def r_squared_by_hour(self) -> pd.Series:

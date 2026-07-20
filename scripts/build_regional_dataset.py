@@ -1,26 +1,26 @@
-"""Construction du dataset RÉGIONAL (Étape B/C du modèle région par région).
+"""Build of the REGIONAL dataset (Step B/C of the region-by-region model).
 
-Produit, pour chacune des 12 régions gazières, un DataFrame au **même schéma
-que le dataset national** (`dataset_final.parquet`) : cible `y_gas_mw` +
-prédicteurs du Tableau 1. Ainsi les modèles existants (`models/ols.py`,
-`models/sure.py`, `models/kalman.py`) et `models/dataset.build_hourly_equations`
-s'appliquent tels quels, région par région, sans aucune modification.
+Produces, for each of the 12 gas regions, a DataFrame with the **same schema
+as the national dataset** (`dataset_final.parquet`): target `y_gas_mw` +
+Table 1 predictors. The existing models (`models/ols.py`, `models/sure.py`,
+`models/kalman.py`) and `models/dataset.build_hourly_equations` therefore
+apply as-is, region by region, without any modification.
 
-Ce qui est PROPRE à chaque région :
-  - `y_gas_mw`       : consommation régionale (industriel + distribution), UTC ;
-  - `temp_raw_c`     : température régionale (moyenne pondérée population des
-                        stations de la région) ;
-  - `temp_smo`, `X1_heating`, `X2_smo_heating` : bloc thermique recalculé sur
-                        la température de la région.
-Ce qui est PARTAGÉ (national, identique pour toutes les régions) :
-  - Fourier (saisonnalité), indicatrices calendaires, `beta_0`.
+What is SPECIFIC to each region:
+  - `y_gas_mw`       : regional consumption (industrial + distribution), UTC;
+  - `temp_raw_c`     : regional temperature (population-weighted average of
+                        the region's stations);
+  - `temp_smo`, `X1_heating`, `X2_smo_heating`: thermal block recomputed on
+                        the region's temperature.
+What is SHARED (national, identical for every region):
+  - Fourier (seasonality), calendar indicators, `beta_0`.
 
-Fenêtre : démarre à `gas_regional.hourly_valid_start` (2023-06-01) — avant cette
-date le profil horaire régional est déphasé (cf. src/regional_gas.py), inadapté
-à un modèle horaire.
+Window: starts at `gas_regional.hourly_valid_start` (2023-06-01) — before
+that date the regional intraday profile is phase-shifted (see
+src/regional_gas.py), unsuitable for an hourly model.
 
-Sortie : data/processed/regional/dataset_region_<code>.parquet (un par région)
-+ qc_regional.json.
+Output: data/processed/regional/dataset_region_<code>.parquet (one per
+region) + qc_regional.json.
 """
 from __future__ import annotations
 
@@ -28,10 +28,13 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
-from build_dataset import (
+from scripts.build_dataset import (
     load_holidays,
     load_school_holidays,
     run_qc,
@@ -60,7 +63,7 @@ logger = logging.getLogger("build_regional_dataset")
 
 
 def _build_shared_features(config: dict, index: pd.DatetimeIndex) -> pd.DataFrame:
-    """Features nationales (identiques pour toutes les régions) sur l'index UTC."""
+    """National features (identical for every region) over the UTC index."""
     fourier_cfg = config["fourier"]
     calendar_tz = config["timezone"]["calendar_reference"]
 
@@ -81,7 +84,7 @@ def build_regional(config: dict) -> tuple[dict[int, pd.DataFrame], dict]:
     gas_r = load_regional_gas(config)       # UTC x code_region
     temp_r = load_meteo_regional(config)    # UTC x code_region
 
-    # Fenêtre : historique horaire fiable uniquement.
+    # Window: reliable hourly history only.
     start = pd.Timestamp(config["gas_regional"]["hourly_valid_start"])
     if start.tzinfo is None:
         start = start.tz_localize("UTC")
@@ -122,7 +125,7 @@ def build_regional(config: dict) -> tuple[dict[int, pd.DataFrame], dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out-subdir", default="regional", help="sous-dossier de data/processed/")
+    parser.add_argument("--out-subdir", default="regional", help="subdirectory of data/processed/")
     args = parser.parse_args(argv)
 
     config = load_config()

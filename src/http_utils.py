@@ -1,4 +1,4 @@
-"""Téléchargement HTTP idempotent avec retry, pour tous les scripts fetch_*."""
+"""Idempotent HTTP downloads with retry, shared by all fetch_* scripts."""
 from __future__ import annotations
 
 import logging
@@ -22,9 +22,9 @@ def download(
     timeout: int = 60,
     params: dict | None = None,
 ) -> Path:
-    """Télécharge `url` vers `dest`. Idempotent : skip si `dest` existe déjà et
-    n'est pas vide, sauf si force=True. Retry avec backoff exponentiel sur
-    erreurs réseau/5xx."""
+    """Download `url` to `dest`. Idempotent: skipped when `dest` already exists
+    and is non-empty, unless force=True. Retries with exponential backoff on
+    network/5xx errors."""
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() and dest.stat().st_size > 0 and not force:

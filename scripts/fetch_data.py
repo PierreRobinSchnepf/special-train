@@ -1,13 +1,13 @@
-"""Ingestion brute (étape 1) : télécharge et met en cache localement les 4 sources.
+"""Raw ingestion (step 1): download and locally cache the 4 data sources.
 
-Idempotent : toute ressource déjà présente dans data/raw/ est sautée, sauf
---force. L'année en cours des séries gaz est toujours retéléchargée (données
-encore provisoires côté ODRÉ), sauf --no-refresh-current-year.
+Idempotent: any resource already present in data/raw/ is skipped, unless
+--force. The current year of the gas series is always re-downloaded (data
+still provisional on the ODRÉ side), unless --no-refresh-current-year.
 
-Usage :
-    python fetch_data.py                      # tout
-    python fetch_data.py --only gas meteo      # sous-ensemble
-    python fetch_data.py --force               # ignore le cache
+Usage:
+    python scripts/fetch_data.py                      # everything
+    python scripts/fetch_data.py --only gas meteo      # subset
+    python scripts/fetch_data.py --force               # ignore the cache
 """
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ import argparse
 import datetime as dt
 import logging
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_config, resolve_path
 from src.http_utils import download, get_json
@@ -156,11 +159,11 @@ def fetch_school_holidays(config: dict, force: bool = False) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", nargs="+", choices=SOURCES, default=SOURCES)
-    parser.add_argument("--force", action="store_true", help="ignore le cache local")
+    parser.add_argument("--force", action="store_true", help="ignore the local cache")
     parser.add_argument(
         "--no-refresh-current-year",
         action="store_true",
-        help="ne pas retélécharger systématiquement l'année gaz en cours",
+        help="do not systematically re-download the current gas year",
     )
     args = parser.parse_args(argv)
 

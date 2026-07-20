@@ -1,99 +1,101 @@
-# Configuration unique du pipeline. Aucun paramètre "en dur" ne doit apparaître
-# ailleurs dans le code : tout coefficient, seuil ou fenêtre de date vit ici.
+# Single pipeline configuration. No parameter may be hard-coded elsewhere in
+# the code: every coefficient, threshold or date window lives here.
 
 # ---------------------------------------------------------------------------
-# Fenêtre temporelle du dataset final
+# Time window of the final dataset
 # ---------------------------------------------------------------------------
 date_range:
-  start: "2018-01-01T00:00:00Z"   # borne inférieure demandée par le rapport
-  end: null                        # null = jusqu'à la dernière donnée disponible
+  start: "2018-01-01T00:00:00Z"   # lower bound required by the source report
+  end: null                        # null = up to the latest available data
 
 # ---------------------------------------------------------------------------
-# Convention de fuseau horaire
+# Timezone convention
 # ---------------------------------------------------------------------------
-# Index maître du dataset : horaire UTC continu (pas de doublon/trou DST).
-# - y (gaz, ODRÉ)      : `date_heure` est déjà en UTC (vérifié : 23:30 heure
-#   locale Paris <-> 21:30Z en été, écart de +2h = CEST). Aucune conversion.
-# - T (SYNOP Météo-France) : `AAAAMMJJHH` est en UTC (convention SYNOP standard).
-#   Aucune conversion.
-# - Les variables calendaires (jour de semaine, jour de l'année pour Fourier,
-#   jours fériés, vacances scolaires, fin d'année) dépendent du calendrier
-#   CIVIL FRANÇAIS, donc sont dérivées de l'horodatage converti en
-#   Europe/Paris (uniquement pour en extraire la date locale), puis
-#   réattachées à l'index UTC. Ceci évite de mal classer les heures
-#   22:00–23:59 UTC (qui appartiennent déjà au jour civil suivant à Paris).
+# Master dataset index: continuous hourly UTC (no DST duplicates/gaps).
+# - y (gas, ODRÉ)      : `date_heure` is already UTC (verified: 23:30 Paris
+#   local time <-> 21:30Z in summer, +2h offset = CEST). No conversion.
+# - T (SYNOP Météo-France): `AAAAMMJJHH` is UTC (standard SYNOP convention).
+#   No conversion.
+# - Calendar variables (weekday, day of year for Fourier, public holidays,
+#   school holidays, end-of-year window) depend on the FRENCH CIVIL calendar,
+#   so they are derived from the timestamp converted to Europe/Paris (only to
+#   extract the local date), then reattached to the UTC index. This avoids
+#   misclassifying the 22:00–23:59 UTC hours (which already belong to the
+#   next civil day in Paris).
 timezone:
   master_index: "UTC"
   calendar_reference: "Europe/Paris"
 
 # ---------------------------------------------------------------------------
-# Source 1 : consommation gaz horaire (y)
+# Source 1: hourly gas consumption (y)
 # ---------------------------------------------------------------------------
 gas:
   dataset_id: "consommation-quotidienne-brute"
-  # Endpoint v2 "exports/csv" : pas de limite offset+limit<=10000 (contrairement
-  # à /records qui plafonne à 10k lignes cumulées) ni de troncature ~4 Mo
-  # (contrairement à l'endpoint v1 /api/records/1.0/download/). Vérifié
-  # empiriquement le 2026-07-16. Chunké par année civile pour rester sous
-  # les limites de taille de réponse et permettre un cache incrémental.
+  # v2 "exports/csv" endpoint: no offset+limit<=10000 cap (unlike /records,
+  # which caps at 10k cumulative rows) and no ~4 MB truncation (unlike the v1
+  # /api/records/1.0/download/ endpoint). Verified empirically on 2026-07-16.
+  # Chunked by civil year to stay under response-size limits and allow an
+  # incremental cache.
   base_url: "https://odre.opendatasoft.com/api/v2/catalog/datasets/consommation-quotidienne-brute/exports/csv"
-  # Champ constaté au 2026-07-16 (le champ "gaz_grtgaz" mentionné dans la
-  # spec initiale n'existe plus : le schéma a évolué vers un champ agrégé
-  # GRTgaz+Terega). Vérifier via l'endpoint catalog/datasets si le fetch échoue.
+  # Field observed as of 2026-07-16 (the "gaz_grtgaz" field mentioned in the
+  # initial spec no longer exists: the schema evolved to an aggregated
+  # GRTgaz+Terega field). Check the catalog/datasets endpoint if the fetch
+  # fails.
   value_field: "consommation_brute_gaz_totale"
   datetime_field: "date_heure"
   unit: "MW PCS 0°C"
-  perimeter: "France continentale (réseaux GRTgaz + Terega)"
+  perimeter: "Continental France (GRTgaz + Terega networks)"
 
 # ---------------------------------------------------------------------------
-# Source 1bis : consommation gaz RÉGIONALE (cible du modèle région par région)
+# Source 1bis: REGIONAL gas consumption (target of the per-region model)
 # ---------------------------------------------------------------------------
-# Le dataset national `consommation-quotidienne-brute` (ci-dessus) n'a pas de
-# ventilation régionale. La consommation par région se reconstitue en sommant
-# deux datasets ODRÉ régionaux (mêmes que pipeline/gas_freshness.py, mais ici
-# on GARDE la maille région au lieu de sommer sur tout le pays) :
-#   - industriel  : `conso-journa-industriel-grtgazterega`      (2018-01-01 ->)
+# The national `consommation-quotidienne-brute` dataset (above) has no
+# regional breakdown. Per-region consumption is reconstructed by summing two
+# regional ODRÉ datasets (same pair as pipeline/gas_freshness.py, but here
+# the regional granularity is KEPT instead of summing country-wide):
+#   - industrial   : `conso-journa-industriel-grtgazterega`      (2018-01-01 ->)
 #   - distribution : `courbe-de-charge-eldgrd-regional-grtgaz-terega` (2018-06-01 ->)
-# Vérifié empiriquement le 2026-07-17 : les deux couvrent les mêmes 12 régions
-# métropolitaines raccordées au réseau (toutes sauf la Corse, non raccordée au
-# gaz naturel), 2 opérateurs (NaTran ex-GRTgaz + Teréga), plusieurs secteurs.
-# Format LARGE (une colonne par heure), heure LOCALE Europe/Paris (pas UTC) —
-# conversion obligatoire, cf. src/regional_gas.py. Retard de publication
-# ~15-20 j (vs ~45-50 j pour l'agrégat national).
+# Verified empirically on 2026-07-17: both cover the same 12 metropolitan
+# regions connected to the grid (all but Corsica, not connected to natural
+# gas), 2 operators (NaTran ex-GRTgaz + Teréga), several sectors.
+# WIDE format (one column per hour), LOCAL Europe/Paris time (not UTC) —
+# conversion mandatory, see src/regional_gas.py. Publication lag ~15-20 days
+# (vs ~45-50 days for the national aggregate).
 gas_regional:
   industrial_dataset_id: "conso-journa-industriel-grtgazterega"
   distribution_dataset_id: "courbe-de-charge-eldgrd-regional-grtgaz-terega"
   export_url_template: "https://odre.opendatasoft.com/api/v2/catalog/datasets/{dataset_id}/exports/csv"
   date_field: "date"
   region_code_field: "code_region"
-  # Le champ industriel démarre en janvier 2018, la distribution en juin 2018 ;
-  # une région n'a de total complet (indus + distrib) qu'à partir de la plus
-  # tardive des deux. Documenté ici plutôt que codé en dur.
+  # The industrial field starts in January 2018, distribution in June 2018;
+  # a region only has a complete total (industrial + distribution) from the
+  # later of the two. Documented here rather than hard-coded.
   distribution_start: "2018-06-01"
-  # Début de l'historique horaire NATIF FIABLE. Découverte empirique (2026-07-18,
-  # cf. src/regional_gas.py) : avant juin 2023 le profil intra-journalier des
-  # données régionales est déphasé (~+6h sur la distribution ; pic à 12h UTC en
-  # 2018-2022 vs 06h UTC en 2024+), corrompant la forme horaire — alors que les
-  # totaux journaliers restent corrects. Bascule de convention nette à 2023-06 :
-  # Σrégions vs national passe de ~11-19% (avant) à 0,01-0,5% (après) d'écart
-  # horaire médian. Les modèles régionaux HORAIRES ne s'entraînent donc que sur
-  # >= cette date (décision utilisateur : ne pas tenter de corriger le pré-2023).
+  # Start of the RELIABLE native hourly history. Empirical finding
+  # (2026-07-18, see src/regional_gas.py): before June 2023 the intraday
+  # profile of the regional data is phase-shifted (~+6h on distribution;
+  # peak at 12h UTC in 2018-2022 vs 06h UTC in 2024+), corrupting the hourly
+  # shape — while daily totals stay correct. Clean convention switch at
+  # 2023-06: Σregions vs national goes from ~11-19% (before) to 0.01-0.5%
+  # (after) median hourly gap. HOURLY regional models therefore only train
+  # from this date on (user decision: no attempt to fix pre-2023).
   hourly_valid_start: "2023-06-01"
-  # Nettoyage des "chutes isolées" : la source encode un artefact récurrent au
-  # samedi 01:00 UTC précédant la bascule DST de mars (valeurs 0 à ~100 MW alors
-  # que la région tourne à des milliers de MW). Un simple seuil de magnitude est
-  # dangereux (le vrai minimum d'été d'Occitanie ~104 MW frôle l'anomalie
-  # ~100 MW) ; on filtre donc sur le CARACTÈRE ISOLÉ : toute heure < dip_fraction
-  # x min(voisins) est un collapse d'une heure impossible (inertie thermique) ->
-  # NaN. Marge énorme : anomalies ~6% des voisins, vrais creux ~90%.
+  # "Isolated dip" cleaning: the source encodes a recurring artefact on the
+  # Saturday 01:00 UTC preceding the March DST switch (values 0 to ~100 MW
+  # while the region runs at thousands of MW). A plain magnitude threshold is
+  # dangerous (Occitanie's true summer minimum ~104 MW grazes the ~100 MW
+  # anomaly); the filter therefore targets the ISOLATED nature: any hour <
+  # dip_fraction x min(neighbors) is an impossible one-hour collapse (thermal
+  # inertia) -> NaN. Huge margin: anomalies ~6% of neighbors, true troughs
+  # ~90%.
   dip_fraction: 0.5
   raw_subdir: "gas_regional"
-  # Le dataset distribution exporte de gros CSV annuels (plusieurs Mo, serveur
-  # ODRÉ lent) qui dépassent le timeout HTTP par défaut de 60s -> timeout dédié.
+  # The distribution dataset exports large yearly CSVs (several MB, slow ODRÉ
+  # server) that exceed the default 60s HTTP timeout -> dedicated timeout.
   request_timeout: 300
-  # Table de correspondance code INSEE -> nom canonique (les noms bruts des CSV
-  # varient : "Grand-Est"/"Grand Est", "Ile-de-France"/"Île-de-France"...).
-  # On indexe sur le code_region numérique, stable, jamais sur le libellé brut.
+  # INSEE code -> canonical name mapping (raw CSV names vary:
+  # "Grand-Est"/"Grand Est", "Ile-de-France"/"Île-de-France"...).
+  # Always keyed on the numeric, stable code_region, never the raw label.
   regions:
     11: "Île-de-France"
     24: "Centre-Val de Loire"
@@ -109,32 +111,32 @@ gas_regional:
     93: "Provence-Alpes-Côte d'Azur"
 
 # ---------------------------------------------------------------------------
-# Source 2 : température horaire (Météo-France, données climatologiques
-# de base horaires, fichiers par département)
+# Source 2: hourly temperature (Météo-France, base hourly climatological
+# data, per-department files)
 # ---------------------------------------------------------------------------
 meteo:
   datagouv_dataset_id: "6569b4473bedf2e7abad3b72"  # "Données climatologiques de base - horaires"
-  # Panier de stations : un département "représentatif" par grande zone
-  # climatique/démographique de France continentale. Le fichier département
-  # contient plusieurs postes (NUM_POSTE) ; le poste retenu par département
-  # est choisi AUTOMATIQUEMENT au run comme celui ayant la meilleure
-  # couverture non-nulle de la colonne T sur la période — ce choix est loggé
-  # dans data/raw/meteo/station_selection.json pour audit, plutôt que deviné
-  # silencieusement.
+  # Station basket: one "representative" department per major climatic/
+  # demographic zone of continental France. Each department file contains
+  # several stations (NUM_POSTE); the station kept per department is chosen
+  # AUTOMATICALLY at run time as the one with the best non-null coverage of
+  # the T column over the period — this choice is logged to
+  # data/raw/meteo/station_selection.json for audit, rather than silently
+  # guessed.
   #
-  # Pondération : proxy démographique (population du département, ordre de
-  # grandeur INSEE ~2021, PAS une zone officielle GRTgaz — cette dernière
-  # n'est pas publiée en open data). Choix documenté explicitement plutôt
-  # que supposé : voir data_dictionary.md § Température nationale.
+  # Weighting: demographic proxy (department population, INSEE ~2021 order of
+  # magnitude, NOT an official GRTgaz zoning — the latter is not published as
+  # open data). Documented explicitly rather than assumed: see
+  # docs/data-dictionary.md § National temperature.
   #
-  # `region_code` (INSEE) rattache chaque département à sa région administrative,
-  # pour construire une température PAR RÉGION (moyenne pondérée population des
-  # stations de la région) en plus de la température nationale. Les 12 régions
-  # gazières (cf. gas_regional) sont toutes couvertes par >= 1 station. Ajout au
-  # 2026-07-18 : dept 45 (Loiret / Orléans) — le panier national d'origine ne
-  # contenait aucune station en Centre-Val de Loire (24) ; on prend la préfecture
-  # de région. La température nationale reste inchangée (les poids nationaux ne
-  # dépendent pas de region_code), seul le 45 s'y ajoute marginalement.
+  # `region_code` (INSEE) attaches each department to its administrative
+  # region, to build a PER-REGION temperature (population-weighted average of
+  # the region's stations) in addition to the national one. The 12 gas
+  # regions (see gas_regional) are all covered by >= 1 station. Added on
+  # 2026-07-18: dept 45 (Loiret / Orléans) — the original national basket had
+  # no station in Centre-Val de Loire (24); the regional prefecture is used.
+  # The national temperature is unchanged (national weights do not depend on
+  # region_code), only dept 45 joins it marginally.
   stations:
     - department: "75"
       region_code: 11
@@ -200,23 +202,23 @@ meteo:
       region_code: 44
       region_label: "Marne (Reims)"
       weight: 566000
-  min_period_start_year: 2010  # ne télécharge que les archives décennales >= cette année
-  value_field: "T"             # °C, déjà en unités réelles (pas de /10 à appliquer)
+  min_period_start_year: 2010  # only download decennial archives >= this year
+  value_field: "T"             # °C, already in real units (no /10 to apply)
   station_id_field: "NUM_POSTE"
   datetime_field: "AAAAMMJJHH"
   datetime_format: "%Y%m%d%H"
-  # Comblement des trous courts avant le lissage EWMA (capteur hors ligne
-  # quelques heures). Au-delà, la valeur reste NaN et est loggée en QC.
+  # Short-gap filling before the EWMA smoothing (sensor offline for a few
+  # hours). Beyond this, the value stays NaN and is logged in QC.
   max_ffill_gap_hours: 3
 
 # ---------------------------------------------------------------------------
-# Source 3 : jours fériés
+# Source 3: public holidays
 # ---------------------------------------------------------------------------
 holidays:
   url: "https://etalab.github.io/jours-feries-france-data/csv/jours_feries_metropole.csv"
 
 # ---------------------------------------------------------------------------
-# Source 4 : vacances scolaires (zones A/B/C)
+# Source 4: school holidays (zones A/B/C)
 # ---------------------------------------------------------------------------
 school_holidays:
   api_url: "https://data.education.gouv.fr/api/records/1.0/search/"
@@ -225,57 +227,58 @@ school_holidays:
   zones_metropole: ["Zone A", "Zone B", "Zone C"]
 
 # ---------------------------------------------------------------------------
-# Bloc thermique (Tableau 1)
+# Thermal block (Table 1)
 # ---------------------------------------------------------------------------
 thermal:
-  t_base_celsius: 15.0   # seuil de base pour X1_heating et X2_smo_heating
+  t_base_celsius: 15.0   # base threshold for X1_heating and X2_smo_heating
   kappa: 0.98             # T_smo_t = kappa*T_smo_{t-1} + (1-kappa)*T_t (Dordonnat et al.)
-  init_method: "first_observation"  # T_smo_0 = T_0 ; alternative documentée : "first_week_mean"
+  init_method: "first_observation"  # T_smo_0 = T_0; documented alternative: "first_week_mean"
 
 # ---------------------------------------------------------------------------
-# Bloc saisonnier (Fourier)
+# Seasonal block (Fourier)
 # ---------------------------------------------------------------------------
 fourier:
   harmonics: [1, 2, 3, 4]
   days_in_year: 365.25
 
 # ---------------------------------------------------------------------------
-# Bloc calendaire
+# Calendar block
 # ---------------------------------------------------------------------------
 calendar:
   end_of_year_window: { start_month: 12, start_day: 24, end_month: 12, end_day: 31 }
-  # AMBIGUÏTÉ SIGNALÉE (cf. spec) : le rapport mentionne un possible creux
-  # mi-août sans le lister dans le Tableau 1. NON implémenté ici — pas de
-  # colonne is_mid_august. À confirmer avec l'auteur du rapport avant ajout.
+  # FLAGGED AMBIGUITY (see spec): the source report mentions a possible
+  # mid-August dip without listing it in Table 1. NOT implemented here — no
+  # is_mid_august column. To be confirmed with the report's author first.
   mid_august_dip: null
-  # AMBIGUÏTÉ SIGNALÉE : is_off_peak_period n'a pas de définition opérationnelle
-  # unique dans le rapport source ("vacances, jours fériés et trêve de fin
-  # d'année"). Définition PROPOSÉE et documentée ici plutôt que supposée :
-  #   is_off_peak_period = 1 si (jour férié France métropolitaine)
-  #                          OR (au moins une zone scolaire A/B/C en vacances)
+  # FLAGGED AMBIGUITY: is_off_peak_period has no single operational
+  # definition in the source report ("school holidays, public holidays and
+  # end-of-year break"). Definition PROPOSED and documented here rather than
+  # assumed:
+  #   is_off_peak_period = 1 if (metropolitan public holiday)
+  #                          OR (at least one school zone A/B/C on break)
   #                          OR (is_end_of_year == 1)
-  # Recouvrement volontaire avec is_end_of_year (le rapport les associe déjà
-  # dans la même ligne du Tableau 1) : les deux colonnes sont conservées
-  # séparément pour laisser le modèle estimer un effet différentiel.
+  # Deliberate overlap with is_end_of_year (the report already groups them on
+  # the same Table 1 row): both columns are kept separate so the model can
+  # estimate a differential effect.
   off_peak_definition: "holiday OR any_school_zone_on_break OR end_of_year"
 
 # ---------------------------------------------------------------------------
-# Modèles RÉGIONAUX (Étape C : un jeu de modèles par région)
+# REGIONAL models (Step C: one model set per region)
 # ---------------------------------------------------------------------------
-# Fenêtres d'entraînement/test spécifiques aux modèles régionaux. Différentes du
-# national (constantes dans models/persistence.py) car l'historique horaire
-# régional fiable ne commence qu'à gas_regional.hourly_valid_start (cf.
-# [[regional-gas-hourly-phase-shift]]) : ~3 hivers seulement.
+# Train/test windows specific to the regional models. Different from the
+# national ones (constants in models/persistence.py) because the reliable
+# regional hourly history only starts at gas_regional.hourly_valid_start:
+# ~3 winters only.
 regional_models:
-  # Tous les modèles régionaux démarrent au début de l'historique propre (pas
-  # de décalage 2018/2020 comme au national — rien d'exploitable avant).
+  # Every regional model starts at the beginning of the clean history (no
+  # 2018/2020 offset as in the national case — nothing usable before).
   train_start: "2023-06-01"
-  # Hold-out = dernière année complète (chauffe 2025-26 incluse). Train =
-  # [train_start, test_start) = 2023-06 -> 2025-07 (~2 hivers : 23-24, 24-25).
+  # Hold-out = last complete year (2025-26 heating season included). Train =
+  # [train_start, test_start) = 2023-06 -> 2025-07 (~2 winters: 23-24, 24-25).
   test_start: "2025-07-01"
   test_end: "2026-07-01"
-  # OLS volontairement EXCLU (jugé sans valeur ajoutée vs SURE). On n'entraîne
-  # que le SURE (statique) et le Kalman-SUR (ajustement dynamique).
+  # OLS deliberately EXCLUDED (judged to add no value over SURE). Only the
+  # SURE (static) and the Kalman-SUR (dynamic adjustment) are trained.
   models: ["sure", "kalman"]
   artifacts_subdir: "regional"        # -> data/models/regional/region_<code>_<model>.pkl
   dataset_subdir: "regional"           # <- data/processed/regional/dataset_region_<code>.parquet
@@ -284,4 +287,4 @@ output:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   parquet_path: "data/processed/dataset_final.parquet"
-  data_dictionary_path: "data_dictionary.md"
+  data_dictionary_path: "docs/data-dictionary.md"

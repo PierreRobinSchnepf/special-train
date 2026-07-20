@@ -1,21 +1,21 @@
-"""Reconstruction d'un total national gaz plus frais que l'agrégat officiel.
+"""Reconstruction of a national gas total fresher than the official aggregate.
 
-Constat (recherche documentée dans le README du pipeline) : le dataset ODRÉ
-utilisé pour l'entraînement (`consommation-quotidienne-brute`) publie ses
-valeurs "Définitif" avec ~45-50 jours de retard — inutilisable pour une
-assimilation quotidienne. Deux datasets régionaux, sommés sur les 13 régions
-et les 2 opérateurs (NaTran + Teréga), reconstituent le même total à ~0.2%
-près, avec un retard réduit à ~15-20 jours :
-  - `conso-journa-industriel-grtgazterega`      (clients industriels)
-  - `courbe-de-charge-eldgrd-regional-grtgaz-terega` (distributions publiques, GRD/ELD)
+Finding (research documented in the pipeline README): the ODRÉ dataset used
+for training (`consommation-quotidienne-brute`) publishes its "Définitif"
+values with a ~45-50 day lag — unusable for daily assimilation. Two regional
+datasets, summed over the regions and the 2 operators (NaTran + Teréga),
+reconstruct the same total to within ~0.2%, with the lag reduced to ~15-20
+days:
+  - `conso-journa-industriel-grtgazterega`      (industrial customers)
+  - `courbe-de-charge-eldgrd-regional-grtgaz-terega` (public distribution, DSO/LDC)
 
-Point non documenté ailleurs et vérifié empiriquement (comparaison heure par
-heure contre notre dataset UTC de référence, cf. conversation) : les colonnes
-horaires de ces deux datasets sont en heure LOCALE Europe/Paris (pas UTC, et
-pas de décalage "jour gazier" malgré l'ordre d'export 06h→05h du dataset
-industriel — cet ordre est un artefact d'affichage, chaque colonne reste
-étiquetée par son heure locale réelle). Conversion locale→UTC obligatoire
-avant toute fusion avec le reste du pipeline (qui est tout en UTC).
+A point documented nowhere else and verified empirically (hour-by-hour
+comparison against our reference UTC dataset): the hourly columns of these
+two datasets are in LOCAL Europe/Paris time (not UTC, and no "gas day"
+offset despite the 06h→05h export order of the industrial dataset — that
+order is a display artefact, each column stays labeled with its true local
+hour). Local→UTC conversion is mandatory before any merge with the rest of
+the pipeline (which is all UTC).
 """
 from __future__ import annotations
 
@@ -47,9 +47,9 @@ def _fetch_export_csv(dataset_id: str, start: dt.date, end: dt.date) -> pd.DataF
 
 
 def _hour_columns(df: pd.DataFrame) -> dict[str, int]:
-    """Mappe chaque colonne horaire à son heure locale (0-23), quel que soit
-    le nom exact (les deux datasets ont des conventions de nommage différentes
-    et parfois incohérentes en interne — cf. docstring du module)."""
+    """Map each hourly column to its local hour (0-23), whatever the exact
+    name (the two datasets use different and sometimes internally
+    inconsistent naming conventions — see the module docstring)."""
     mapping = {}
     for col in df.columns:
         m = _HOUR_COL_RE.match(col)
@@ -59,9 +59,9 @@ def _hour_columns(df: pd.DataFrame) -> dict[str, int]:
 
 
 def _wide_to_utc_series(df: pd.DataFrame) -> pd.Series:
-    """Somme toutes les régions/opérateurs, convertit heure locale -> UTC,
-    retourne une série indexée par timestamp UTC (MWh -> traité comme MW,
-    cohérent avec le reste du pipeline : valeur horaire = puissance moyenne)."""
+    """Sum all regions/operators, convert local time -> UTC, return a series
+    indexed by UTC timestamp (MWh -> treated as MW, consistent with the rest
+    of the pipeline: hourly value = average power)."""
     hour_cols = _hour_columns(df)
     if not hour_cols:
         return pd.Series(dtype=float)
@@ -75,8 +75,8 @@ def _wide_to_utc_series(df: pd.DataFrame) -> pd.Series:
     long_df = pd.concat(long_rows, ignore_index=True).dropna(subset=["value"])
     grouped_local = long_df.groupby("local_ts")["value"].sum()
 
-    # Localisation Europe/Paris -> UTC. Les rares heures ambiguës/inexistantes
-    # (transitions DST) sont abandonnées plutôt que devinées.
+    # Europe/Paris localization -> UTC. The few ambiguous/nonexistent hours
+    # (DST transitions) are dropped rather than guessed.
     localized = grouped_local.index.tz_localize(CALENDAR_TZ, ambiguous="NaT", nonexistent="NaT")
     utc_series = pd.Series(grouped_local.to_numpy(), index=localized).dropna(how="all")
     utc_series = utc_series[utc_series.index.notna()]
@@ -85,11 +85,10 @@ def _wide_to_utc_series(df: pd.DataFrame) -> pd.Series:
 
 
 def fetch_fresh_gas_total(start: dt.date, end: dt.date) -> pd.Series:
-    """Total national reconstitué (industriel + distribution), en MW, indexé
-    UTC, pour la fenêtre [start, end]. Peut être plus court que demandé côté
-    droit si les données ne sont pas encore publiées jusque `end` — c'est
-    justement ce qu'on utilise pour détecter le "jour G" (dernière donnée
-    disponible)."""
+    """Reconstructed national total (industrial + distribution), in MW, UTC-
+    indexed, for the [start, end] window. May be shorter than requested on the
+    right side when data is not yet published up to `end` — which is exactly
+    what detects "day G" (the last available data)."""
     industrial = _fetch_export_csv(INDUSTRIAL_DATASET, start, end)
     distribution = _fetch_export_csv(DISTRIBUTION_DATASET, start, end)
 
@@ -97,15 +96,15 @@ def fetch_fresh_gas_total(start: dt.date, end: dt.date) -> pd.Series:
     distribution_utc = _wide_to_utc_series(distribution)
 
     total = industrial_utc.add(distribution_utc, fill_value=None)
-    # add(fill_value=None) garde NaN si l'un des deux manque à une heure donnée
-    # (on ne veut pas d'un total partiel silencieux) ; les deux sources
-    # couvrent en pratique les mêmes jours donc c'est rare.
+    # add(fill_value=None) keeps NaN when either side is missing at a given
+    # hour (no silent partial totals); in practice both sources cover the
+    # same days, so this is rare.
     return total.rename("y_gas_mw_fresh").dropna().sort_index()
 
 
 def last_available_day(series: pd.Series) -> dt.date | None:
-    """Dernier jour CIVIL (Europe/Paris) entièrement couvert par `series`
-    (24 heures présentes) — le "jour G" jusqu'où l'état peut être mis à jour."""
+    """Last CIVIL day (Europe/Paris) fully covered by `series` (24 hours
+    present) — "day G", up to which the state can be updated."""
     if series.empty:
         return None
     local_dates = series.index.tz_convert(CALENDAR_TZ).date

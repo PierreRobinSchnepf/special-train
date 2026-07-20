@@ -1,20 +1,20 @@
-"""Charge (ou entraîne+sauvegarde une fois) les modèles et expose les méthodes
-de lookup du dashboard : prévision d'une heure d'un jour J avec la bonne règle
-"quelles données étaient déjà connues au moment de la prévision".
+"""Load (or train+save once) the models and expose the dashboard's lookup
+methods: predicting one hour of a day J with the correct "which data was
+already known at forecast time" rule.
 
-Une seule classe `ModelStore` sert deux périmètres :
-  - **National** (`region_code=None`) : dataset_final + 3 modèles (Kalman, OLS,
-    SURE), jeu backtest, test 2025. Comportement historique inchangé.
-  - **Régional** (`region_code=<int>`) : dataset_region_<code> + 2 modèles
-    (Kalman, SURE — l'OLS est exclu au régional), jeu backtest, fenêtre de test
-    définie dans config.yaml § regional_models.
+A single `ModelStore` class serves two scopes:
+  - **National** (`region_code=None`): dataset_final + 3 models (Kalman, OLS,
+    SURE), backtest set, 2025 test. Historical behavior unchanged.
+  - **Regional** (`region_code=<int>`): dataset_region_<code> + 2 models
+    (Kalman, SURE — OLS is excluded regionally), backtest set, test window
+    defined in config.yaml § regional_models.
 
-Le dashboard itère sur `store.models` (liste ordonnée (clé, libellé)) plutôt que
-de coder en dur les 3 modèles : ajouter/retirer un modèle ne touche qu'ici.
+The dashboard iterates over `store.models` (ordered (key, label) list) rather
+than hard-coding the 3 models: adding/removing a model only touches this file.
 
-Règle d'assimilation (cf. spec : à J 17h, on prévoit J[17h-23h] + J+1[0h-23h]) :
-pour une heure cible `hour`, la dernière occurrence réellement connue à "J 17h"
-est aujourd'hui (J) si hour <= 16, sinon hier (J-1).
+Assimilation rule (see spec: at J 17:00, forecast J[17-23h] + J+1[0-23h]):
+for a target hour `hour`, the last occurrence actually known at "J 17:00" is
+today (J) if hour <= 16, else yesterday (J-1).
 """
 from __future__ import annotations
 
@@ -47,21 +47,21 @@ from src.config import load_config, resolve_path
 NATIONAL_TEST_START = "2025-01-01"
 NATIONAL_TEST_END = "2026-01-01"
 
-# Libellés des modèles (l'ordre définit l'ordre d'affichage ; le premier est
-# "notre prédiction" mise en avant).
+# Model labels (the order defines the display order; the first one is "our
+# prediction", shown prominently).
 _LABELS = {
-    "kalman": "Kalman (notre prédiction)",
-    "ols": "OLS (statique)",
-    "sure": "SURE (statique)",
+    "kalman": "Kalman (our prediction)",
+    "ols": "OLS (static)",
+    "sure": "SURE (static)",
 }
 
-# Regroupement des prédicteurs par bloc du Tableau 1 (décomposition explicable).
+# Predictor grouping by Table 1 block (explainable decomposition).
 BLOCKS: dict[str, list[str]] = {
-    "Thermique": ["temp_smo", "X1_heating", "X2_smo_heating"],
-    "Saisonnier (Fourier)": [
+    "Thermal": ["temp_smo", "X1_heating", "X2_smo_heating"],
+    "Seasonal (Fourier)": [
         f"{trig}{s}_{grp}" for trig in ("cos", "sin") for s in (1, 2, 3, 4) for grp in ("WD", "WE")
     ],
-    "Calendaire": ["is_monday", "is_friday", "is_saturday", "is_sunday", "is_end_of_year", "is_off_peak_period"],
+    "Calendar": ["is_monday", "is_friday", "is_saturday", "is_sunday", "is_end_of_year", "is_off_peak_period"],
 }
 
 
@@ -81,7 +81,7 @@ class HourPrediction:
     date: dt.date
     hour: int
     actual: float | None
-    preds: dict[str, ModelPred]          # clé modèle -> (valeur, IC bas, IC haut)
+    preds: dict[str, ModelPred]          # model key -> (value, CI low, CI high)
     decomposition_log: dict[str, float] = field(default_factory=dict)
 
 
@@ -91,7 +91,7 @@ class ModelStore:
         config = load_config()
 
         if region_code is None:
-            # --- périmètre national ---
+            # --- national scope ---
             self.label = "National"
             self.model_keys = ["kalman", "ols", "sure"]
             self.test_start, self.test_end = NATIONAL_TEST_START, NATIONAL_TEST_END
@@ -99,7 +99,7 @@ class ModelStore:
             self._artifact = lambda key: f"backtest_{key}"
             self._train_start = {"ols": OLS_TRAIN_START, "sure": SURE_TRAIN_START, "kalman": KALMAN_TRAIN_START}
         else:
-            # --- périmètre régional (OLS exclu) ---
+            # --- regional scope (OLS excluded) ---
             rm = config["regional_models"]
             names = {int(k): v for k, v in config["gas_regional"]["regions"].items()}
             self.label = f"{region_code} — {names[region_code]}"
@@ -120,44 +120,44 @@ class ModelStore:
 
         self._load_or_train()
 
-        # Attributs de commodité pour les IC (variance résiduelle en niveau).
+        # Convenience attributes for the CIs (level-space residual variance).
         self._ols_mse = self.ols.mse_resid_ if self.has_ols else None
         self._sure_mse = self.sure.stage1_resid_var_
         self.state_cols = self.kalman.state_cols
 
     # ------------------------------------------------------------------
     def _load_or_train(self) -> None:
-        """Charge les artefacts ; entraîne+sauvegarde uniquement ceux qui manquent."""
+        """Load the artifacts; train+save only the missing ones."""
         self.ols = self.sure = self.kalman = None
 
         if self.has_ols:
             self.ols = load_artifact(self._artifact("ols"))
             if self.ols is None:
-                print(f"[model_store {self.label}] entraînement OLS + sauvegarde...")
+                print(f"[model_store {self.label}] training OLS + saving...")
                 train, _ = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["ols"])
                 self.ols = HourlyOLSModel().fit(train)
                 save_artifact(self.ols, self._artifact("ols"))
 
         self.sure = load_artifact(self._artifact("sure"))
         if self.sure is None:
-            print(f"[model_store {self.label}] entraînement SURE + sauvegarde...")
+            print(f"[model_store {self.label}] training SURE + saving...")
             train, _ = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["sure"])
             self.sure = HourlySUREModel().fit(train)
             save_artifact(self.sure, self._artifact("sure"))
 
         self.kalman = load_artifact(self._artifact("kalman"))
         if self.kalman is None:
-            print(f"[model_store {self.label}] entraînement Kalman + sauvegarde...")
+            print(f"[model_store {self.label}] training Kalman + saving...")
             train, test = split_train_test(self.per_hour_all, self.test_start, self.test_end, train_start=self._train_start["kalman"])
             self.kalman = HourlyKalmanSURModel().fit(train)
-            self.kalman.predict(test)  # avance l'état sur le test
+            self.kalman.predict(test)  # advance the state over the test set
             save_artifact(self.kalman, self._artifact("kalman"))
         print(f"[model_store {self.label}] ready.")
 
     # ------------------------------------------------------------------
     def selectable_days(self) -> list[str]:
-        """Jours J sélectionnables : jours de la fenêtre de test présents dans le
-        panel, en laissant un jour de marge pour que J+1 reste couvert."""
+        """Selectable J days: test-window days present in the panel, leaving a
+        one-day margin so that J+1 stays covered."""
         test_dates = sorted(self.test[0].index)
         if not test_dates:
             return []
@@ -168,13 +168,13 @@ class ModelStore:
         if date not in frame.index:
             return None
         row = frame.loc[date]
-        if isinstance(row, pd.DataFrame):  # garde-fou (panel dédupliqué)
+        if isinstance(row, pd.DataFrame):  # safety net (deduplicated panel)
             row = row.iloc[0]
         return row
 
     def _apply_what_if(self, row: pd.Series, temp_delta: float) -> pd.Series:
-        """Décale la température prévue de `temp_delta` °C (approximation : décale
-        directement les 3 variables thermiques, sans recalcul de l'EWMA)."""
+        """Shift the forecast temperature by `temp_delta` °C (approximation:
+        shifts the 3 thermal variables directly, without recomputing the EWMA)."""
         if temp_delta == 0.0:
             return row
         row = row.copy()
@@ -196,7 +196,7 @@ class ModelStore:
         state = traj.loc[lookup_date].to_numpy(dtype=float)
 
         x_state = row[self.state_cols].to_numpy(dtype=float)
-        contrib = x_state * self.kalman.sur_beta_[hour]     # contribution structurelle SUR (log)
+        contrib = x_state * self.kalman.sur_beta_[hour]     # SUR structural contribution (log)
         pred_log = self.kalman.intercept_[hour] + float(contrib @ state)
         kalman_pred = float(np.expm1(pred_log))
 
@@ -209,7 +209,7 @@ class ModelStore:
             float(np.expm1(pred_log + 1.96 * se_log)),
         )
 
-        decomposition_log = {"Fond de roulement (beta0)": self.kalman.intercept_[hour]}
+        decomposition_log = {"Base load (beta0)": self.kalman.intercept_[hour]}
         for block_name, cols in BLOCKS.items():
             idx = [self.state_cols.index(c) for c in cols]
             decomposition_log[block_name] = float(np.sum(contrib[idx] * state[idx]))
@@ -242,7 +242,7 @@ class ModelStore:
         )
 
     def forecast_horizon(self, day_j: dt.date, temp_delta: float = 0.0) -> list[HourPrediction]:
-        """31 points : J[17h-23h] puis J+1[0h-23h], comme une entreprise le ferait à J 17h."""
+        """31 points: J[17-23h] then J+1[0-23h], as a company would do at J 17:00."""
         results = []
         day_j1 = day_j + dt.timedelta(days=1)
         for hour in range(17, 24):
@@ -256,9 +256,9 @@ class ModelStore:
         return results
 
     def rolling_performance(self, end_date: dt.date, window_days: int = 30) -> pd.DataFrame:
-        """Pour chaque jour d de [end_date-window, end_date], la prévision des 24h
-        de d telle qu'elle aurait été faite la veille à 17h, comparée au réel.
-        Retourne un DataFrame long (date, modele, rmse, mape) pour chaque modèle."""
+        """For each day d in [end_date-window, end_date], the 24-hour forecast
+        of d as it would have been made the day before at 17:00, compared with
+        the actuals. Returns a long DataFrame (date, model, rmse, mape) per model."""
         from models.metrics import mape as mape_fn
         from models.metrics import rmse as rmse_fn
 
@@ -274,7 +274,7 @@ class ModelStore:
             for key, label in self.models:
                 pred_series = pd.Series([p.preds[key].value for p in preds])
                 rows.append({
-                    "date": d, "modele": label,
+                    "date": d, "model": label,
                     "rmse": rmse_fn(actual, pred_series), "mape": mape_fn(actual, pred_series),
                 })
         return pd.DataFrame(rows)

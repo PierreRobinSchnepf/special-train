@@ -1,4 +1,4 @@
-"""Métriques d'évaluation : RMSE, MAPE, MAE, et agrégation par heure/modèle."""
+"""Evaluation metrics: RMSE, MAPE, MAE, plus per-hour/per-model aggregation."""
 from __future__ import annotations
 
 import numpy as np
@@ -31,7 +31,7 @@ def evaluate(y_true: pd.Series, y_pred: pd.Series) -> dict:
 
 
 def combine_hourly(preds: dict[int, pd.Series]) -> pd.Series:
-    """Concatène les 24 séries horaires (indexées par `utc_ts`) en une seule série triée."""
+    """Concatenate the 24 hourly series (indexed by `utc_ts`) into one sorted series."""
     return pd.concat(preds.values()).sort_index()
 
 

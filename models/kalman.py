@@ -1,37 +1,37 @@
-"""Benchmark 3 : filtre de Kalman appliqué aux coefficients d'un système SURE.
+"""Benchmark 3: Kalman filter applied to the coefficients of a SURE system.
 
-Référence théorique :
-- Slide "Équation finale : SUR ajusté dynamiquement" (ENGIE / ENSAE) :
-      vrai coefficient = effet structurel moyen x ajustement dynamique
+Theoretical reference:
+- Slide "Final equation: dynamically adjusted SUR" (ENGIE / ENSAE):
+      true coefficient = average structural effect x dynamic adjustment
       β^true_{t,h,j} = β^SUR_{h,j} · β^Kalman_{t,h,j}
       y_{t,h} = β_0 + Σ_j (β^SUR_{h,j} β^Kalman_{t,h,j}) x_{t,h,j}
                      + Σ_j (β^SUR_j   β^Kalman_{t,j})   z_{t,j} + ε_{t,h}
-  → le modèle garde la structure explicable du SUR, mais chaque effet peut
-    dériver dans le temps via un facteur d'échelle multiplicatif.
-- Mécanique du filtre : notebook de référence
+  → the model keeps the explainable SUR structure, but each effect can drift
+    over time through a multiplicative scale factor.
+- Filter mechanics: reference notebook
   github.com/PierreRobinSchnepf/Applied-Statistics-ENGIE (kalman_sur1h.ipynb).
-  Reproduite ici à l'identique :
-    * cible en log (`log1p(y)` / `expm1`) — nécessaire pour que les facteurs
-      d'échelle soient comparables en ordre de grandeur d'une variable/heure
-      à l'autre malgré des contributions structurelles très différentes ;
-    * état = marche aléatoire (β_pred = β_{t-1}, P_pred = P_{t-1} + W) ;
-    * observation scalaire y_t = H_t β_t + ε_t, où H_t est la contribution
-      structurelle SUR (β^SUR_{h,j} · x_{t,h,j}), pas x_t brut — c'est ce
-      qui rend l'état interprétable comme un facteur d'ajustement autour de 1 ;
-    * mise à jour de Kalman standard (gain, innovation, covariance).
+  Reproduced here identically:
+    * log target (`log1p(y)` / `expm1`) — required so that scale factors are
+      comparable in magnitude across variables/hours despite very different
+      structural contributions;
+    * state = random walk (β_pred = β_{t-1}, P_pred = P_{t-1} + W);
+    * scalar observation y_t = H_t β_t + ε_t, where H_t is the SUR structural
+      contribution (β^SUR_{h,j} · x_{t,h,j}), not raw x_t — this is what
+      makes the state interpretable as an adjustment factor around 1;
+    * standard Kalman update (gain, innovation, covariance).
 
-Écart assumé par rapport au notebook de référence : l'intercept β_0 est
-gardé FIXE (non multiplié par un facteur Kalman), conformément à la
-formule de la slide. Le notebook de référence, lui, absorbait un intercept
-dynamique dans le vecteur d'état — non repris ici car absent de la formule
-fournie comme spécification.
+Deliberate deviation from the reference notebook: the intercept β_0 is kept
+FIXED (not multiplied by a Kalman factor), following the slide's formula. The
+reference notebook absorbed a dynamic intercept into the state vector — not
+reproduced here because it is absent from the formula given as the
+specification.
 
-Contrairement au notebook de référence (une seule heure, hyperparamètres
-V/W codés en dur), ce module fait tourner **24 filtres indépendants** (un
-par heure locale, même schéma que HourlyOLSModel / HourlySUREModel) et
-estime le bruit d'observation V_h automatiquement à partir de la variance
-résiduelle du SUR en log pour cette heure, plutôt que de recopier une
-constante réglée pour une seule équation d'un autre jeu de données.
+Unlike the reference notebook (a single hour, hard-coded V/W
+hyperparameters), this module runs **24 independent filters** (one per local
+hour, same scheme as HourlyOLSModel / HourlySUREModel) and estimates the
+observation noise V_h automatically from the SUR's log-space residual
+variance for that hour, rather than copying a constant tuned for a single
+equation of another dataset.
 """
 from __future__ import annotations
 
@@ -63,16 +63,16 @@ def _run_kalman(
     beta_init: np.ndarray | None = None,
     P_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Filtre de Kalman scalaire standard, état = marche aléatoire.
+    """Standard scalar-observation Kalman filter, random-walk state.
 
-    H: (T, p) design (contributions structurelles SUR par pas de temps).
-    y: (T,) observations (log-cible moins intercept fixe).
-    W: bruit de process, scalaire (uniforme) ou vecteur de longueur p
-       (ex. composante différente pour un état "intercept dynamique").
-    Retourne (beta_history, y_pred_pre_update, beta_final, P_final) :
-    `y_pred_pre_update[t]` est la prédiction faite AVANT d'assimiler
-    l'observation t (prévision honnête à un pas), `beta_history[t]` est
-    l'état APRÈS assimilation de l'observation t.
+    H: (T, p) design (SUR structural contributions per time step).
+    y: (T,) observations (log target minus the fixed intercept).
+    W: process noise, scalar (uniform) or length-p vector (e.g. a different
+       component for a "dynamic intercept" state).
+    Returns (beta_history, y_pred_pre_update, beta_final, P_final):
+    `y_pred_pre_update[t]` is the prediction made BEFORE assimilating
+    observation t (honest one-step-ahead forecast), `beta_history[t]` is the
+    state AFTER assimilating observation t.
     """
     T = H.shape[0]
     Wmat = np.diag(np.broadcast_to(W, p).astype(float))
@@ -121,20 +121,20 @@ class HourlyKalmanSURModel:
         self.sur_beta_: dict[int, np.ndarray] = {}
         self.V_: dict[int, float] = {}
 
-        self.beta_state_: dict[int, np.ndarray] = {}   # état courant (marche à mesure des predict())
+        self.beta_state_: dict[int, np.ndarray] = {}   # current state (advances with each predict())
         self.P_state_: dict[int, np.ndarray] = {}
 
         self.train_beta_history_: dict[int, pd.DataFrame] = {}
         self.test_beta_history_: dict[int, pd.DataFrame] = {}
 
-        # Prédictions en-échantillon un-pas-en-avant, calculées une seule fois
-        # pendant fit() (la vraie trajectoire d'entraînement, partant de l'état
-        # initial =1) — à ne pas confondre avec un appel à predict(train_per_hour),
-        # qui reprendrait l'état déjà convergé en fin d'entraînement.
+        # In-sample one-step-ahead predictions, computed once during fit()
+        # (the true training trajectory, starting from the initial state = 1)
+        # — not to be confused with a predict(train_per_hour) call, which
+        # would resume from the state already converged at the end of training.
         self.train_sur_pred_: dict[int, pd.Series] = {}
         self.train_kalman_pred_: dict[int, pd.Series] = {}
 
-    # -- entraînement -------------------------------------------------
+    # -- training -------------------------------------------------------
 
     def fit(self, train_per_hour: dict[int, pd.DataFrame]) -> "HourlyKalmanSURModel":
         log_train = _with_log_target(train_per_hour, self.target_col)
@@ -175,22 +175,22 @@ class HourlyKalmanSURModel:
 
         return self
 
-    # -- prédiction séquentielle (un pas en avant) ---------------------
+    # -- sequential prediction (one step ahead) -------------------------
 
     def predict(
         self, per_hour: dict[int, pd.DataFrame], update_state: bool = True
     ) -> tuple[dict[int, pd.Series], dict[int, pd.Series]]:
-        """Prédiction un-pas-en-avant sur `per_hour`, en poursuivant la récursion
-        de Kalman à partir de l'état courant (fin d'entraînement, ou fin du
-        dernier appel à predict() si `update_state=True`).
+        """One-step-ahead prediction over `per_hour`, continuing the Kalman
+        recursion from the current state (end of training, or end of the last
+        predict() call when `update_state=True`).
 
-        Retourne (sur_pred, kalman_pred), en NIVEAU (MW), chacun un
-        dict[heure -> pd.Series indexée par utc_ts] :
-        - sur_pred    : baseline SUR pure (facteurs figés à 1, pas de Kalman)
-        - kalman_pred : SUR + ajustement dynamique du filtre de Kalman
+        Returns (sur_pred, kalman_pred), in LEVEL (MW), each a
+        dict[hour -> pd.Series indexed by utc_ts]:
+        - sur_pred    : pure SUR baseline (factors frozen at 1, no Kalman)
+        - kalman_pred : SUR + dynamic Kalman-filter adjustment
         """
         if self.sure_ is None:
-            raise RuntimeError("fit() doit être appelé avant predict()")
+            raise RuntimeError("fit() must be called before predict()")
 
         sur_preds, kalman_preds = {}, {}
         for h in range(N_HOURS):
@@ -210,8 +210,8 @@ class HourlyKalmanSURModel:
                 self.beta_state_[h] = beta_final
                 self.P_state_[h] = P_final
 
-            kalman_log = self.intercept_[h] + y_pred_resid   # prédiction PRE-update (un pas en avant)
-            sur_log = self.intercept_[h] + H.sum(axis=1)      # facteurs figés à 1
+            kalman_log = self.intercept_[h] + y_pred_resid   # PRE-update prediction (one step ahead)
+            sur_log = self.intercept_[h] + H.sum(axis=1)      # factors frozen at 1
 
             utc_ts = frame["utc_ts"].to_numpy()
             kalman_preds[h] = pd.Series(np.expm1(kalman_log), index=utc_ts, name=f"kalman_pred_h{h}")
@@ -222,8 +222,8 @@ class HourlyKalmanSURModel:
     # -- inspection -----------------------------------------------------
 
     def full_beta_trajectory(self, hour: int) -> pd.DataFrame:
-        """Trajectoire complète (train puis test, si predict() a été appelé) des
-        facteurs d'échelle de Kalman pour une heure donnée, indexée par date locale."""
+        """Full trajectory (train then test, if predict() was called) of the
+        Kalman scale factors for a given hour, indexed by local date."""
         parts = [self.train_beta_history_[hour]]
         if hour in self.test_beta_history_:
             parts.append(self.test_beta_history_[hour])

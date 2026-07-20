@@ -1,17 +1,17 @@
-"""Entraîne et persiste les modèles de benchmark, pour que le dashboard et le
-pipeline réel n'aient plus à ré-entraîner (~40s) à chaque lancement.
+"""Train and persist the benchmark models, so the dashboard and the live
+pipeline no longer need to retrain (~40s) on every launch.
 
-Deux jeux d'artefacts (voir `models/persistence.py` pour le détail des
-fenêtres d'entraînement) :
-  - "backtest"   : OLS/SURE sur [2020, 2025), Kalman sur [2018, 2025) + état
-    avancé sur le test 2025 — utilisé par les onglets Forecast/Benchmark/Suivi.
-  - "production" : mêmes bornes basses, mais entraînés jusqu'à fin 2025
-    inclus (pas de test réservé) — utilisé par l'onglet Pipeline réel.
+Two artifact sets (see `models/persistence.py` for the training-window
+details):
+  - "backtest"   : OLS/SURE on [2020, 2025), Kalman on [2018, 2025) + state
+    advanced over the 2025 test — used by the Forecast/Benchmark/Monitoring tabs.
+  - "production" : same lower bounds, but trained through the end of 2025
+    (no held-out test) — used by the Live pipeline tab.
 
-Usage :
-    python train_models.py            # (re)génère les deux jeux
-    python train_models.py --only backtest
-    python train_models.py --only production
+Usage:
+    python scripts/train_models.py            # (re)generate both sets
+    python scripts/train_models.py --only backtest
+    python scripts/train_models.py --only production
 """
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.dataset import build_hourly_equations, load_dataset, split_train_test
 from models.kalman import HourlyKalmanSURModel
@@ -40,12 +43,12 @@ logger = logging.getLogger("train_models")
 def _timed_fit(label: str, fn):
     t0 = time.time()
     result = fn()
-    logger.info("%s entraîné en %.1fs", label, time.time() - t0)
+    logger.info("%s trained in %.1fs", label, time.time() - t0)
     return result
 
 
 def train_backtest(per_hour) -> None:
-    logger.info("=== Jeu 'backtest' (test 2025 réservé) ===")
+    logger.info("=== 'backtest' set (2025 test held out) ===")
     ols_train, _ = split_train_test(per_hour, BACKTEST_TEST_START, BACKTEST_TEST_END, train_start=OLS_TRAIN_START)
     sure_train, _ = split_train_test(per_hour, BACKTEST_TEST_START, BACKTEST_TEST_END, train_start=SURE_TRAIN_START)
     kalman_train, kalman_test = split_train_test(per_hour, BACKTEST_TEST_START, BACKTEST_TEST_END, train_start=KALMAN_TRAIN_START)
@@ -53,30 +56,30 @@ def train_backtest(per_hour) -> None:
     ols = _timed_fit("OLS (backtest, train >= 2020)", lambda: HourlyOLSModel().fit(ols_train))
     sure = _timed_fit("SURE (backtest, train >= 2020)", lambda: HourlySUREModel().fit(sure_train))
     kalman = _timed_fit("Kalman (backtest, train >= 2018)", lambda: HourlyKalmanSURModel().fit(kalman_train))
-    kalman.predict(kalman_test)  # avance l'état sur tout le test 2025
+    kalman.predict(kalman_test)  # advance the state over the whole 2025 test
 
     save_artifact(ols, "backtest_ols")
     save_artifact(sure, "backtest_sure")
     save_artifact(kalman, "backtest_kalman")
-    logger.info("Artefacts 'backtest' sauvegardés dans data/models/.")
+    logger.info("'backtest' artifacts saved to data/models/.")
 
 
 def train_production(per_hour) -> None:
-    logger.info("=== Jeu 'production' (entraîné jusqu'à fin 2025 inclus) ===")
-    # test_start == test_end == BACKTEST_TEST_END : test vide, train = tout
-    # ce qui précède le 01/01/2026, donc 2025 inclus dans le train.
+    logger.info("=== 'production' set (trained through end of 2025) ===")
+    # test_start == test_end == BACKTEST_TEST_END: empty test, train = all
+    # data before 2026-01-01, so 2025 is included in the train set.
     ols_train, _ = split_train_test(per_hour, BACKTEST_TEST_END, BACKTEST_TEST_END, train_start=OLS_TRAIN_START)
     sure_train, _ = split_train_test(per_hour, BACKTEST_TEST_END, BACKTEST_TEST_END, train_start=SURE_TRAIN_START)
     kalman_train, _ = split_train_test(per_hour, BACKTEST_TEST_END, BACKTEST_TEST_END, train_start=KALMAN_TRAIN_START)
 
-    ols = _timed_fit("OLS (production, train >= 2020, jusqu'à fin 2025)", lambda: HourlyOLSModel().fit(ols_train))
-    sure = _timed_fit("SURE (production, train >= 2020, jusqu'à fin 2025)", lambda: HourlySUREModel().fit(sure_train))
-    kalman = _timed_fit("Kalman (production, train >= 2018, jusqu'à fin 2025)", lambda: HourlyKalmanSURModel().fit(kalman_train))
+    ols = _timed_fit("OLS (production, train >= 2020, through end of 2025)", lambda: HourlyOLSModel().fit(ols_train))
+    sure = _timed_fit("SURE (production, train >= 2020, through end of 2025)", lambda: HourlySUREModel().fit(sure_train))
+    kalman = _timed_fit("Kalman (production, train >= 2018, through end of 2025)", lambda: HourlyKalmanSURModel().fit(kalman_train))
 
     save_artifact(ols, "production_ols")
     save_artifact(sure, "production_sure")
     save_artifact(kalman, "production_kalman")
-    logger.info("Artefacts 'production' sauvegardés dans data/models/.")
+    logger.info("'production' artifacts saved to data/models/.")
 
 
 def main(argv: list[str] | None = None) -> int:

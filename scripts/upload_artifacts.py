@@ -1,15 +1,15 @@
-"""Pousse les artefacts runtime (data/processed + data/models) vers S3/MinIO.
+"""Push the runtime artifacts (data/processed + data/models) to S3/MinIO.
 
-À relancer après chaque (ré)entraînement local pour rafraîchir ce que voit le
-dashboard déployé. N'envoie JAMAIS data/raw (1,3 Go, inutile en ligne).
+Rerun after every local (re)training to refresh what the deployed dashboard
+sees. NEVER uploads data/raw (1.3 GB, useless online).
 
-Prérequis : un fichier `.streamlit/secrets.toml` valide à la racine du repo
-(section [s3]) — voir `.streamlit/secrets.toml.example` et DEPLOY.md.
+Prerequisite: a valid `.streamlit/secrets.toml` at the repo root ([s3]
+section) — see `.streamlit/secrets.toml.example` and docs/deployment.md.
 
     python scripts/upload_artifacts.py
 
-Ce script lit les secrets DIRECTEMENT depuis le fichier TOML (il ne tourne pas
-dans un contexte Streamlit) et appelle la même logique d'upload que l'app.
+This script reads the secrets DIRECTLY from the TOML file (it does not run in
+a Streamlit context) and calls the same upload logic as the app.
 """
 from __future__ import annotations
 
@@ -25,24 +25,24 @@ SECRETS_PATH = REPO_ROOT / ".streamlit" / "secrets.toml"
 
 def main() -> int:
     if not SECRETS_PATH.exists():
-        print(f"❌ {SECRETS_PATH} introuvable. Copie .streamlit/secrets.toml.example "
-              f"et renseigne la section [s3].")
+        print(f"[error] {SECRETS_PATH} not found. Copy .streamlit/secrets.toml.example "
+              f"and fill in the [s3] section.")
         return 1
 
     with open(SECRETS_PATH, "rb") as f:
         secrets = tomllib.load(f)
     if "s3" not in secrets:
-        print("❌ Section [s3] absente de secrets.toml.")
+        print("[error] [s3] section missing from secrets.toml.")
         return 1
 
-    # On injecte les secrets dans un faux st.secrets pour réutiliser src.storage
-    # sans dépendre d'un runtime Streamlit.
+    # Inject the secrets into a fake st.secrets so src.storage can be reused
+    # without a Streamlit runtime.
     import src.storage as storage
 
     storage._secrets = lambda: secrets  # type: ignore[assignment]
 
     result = storage.upload_runtime_artifacts(log=print)
-    print(f"✅ {result['uploaded']} fichier(s) envoyé(s) vers s3://{result['bucket']}.")
+    print(f"[ok] {result['uploaded']} file(s) uploaded to s3://{result['bucket']}.")
     return 0
 
 

@@ -1,17 +1,18 @@
-"""Sauvegarde/chargement des modèles entraînés, pour éviter de tout
-ré-entraîner (~40s : OLS + SURE + Kalman) à chaque lancement du dashboard.
+"""Saving/loading of trained models, to avoid retraining everything (~40s:
+OLS + SURE + Kalman) on every dashboard launch.
 
-Deux jeux de modèles, avec des fenêtres d'entraînement différentes :
-  - "backtest"   : utilisé par les onglets Forecast/Benchmark/Suivi. OLS/SURE
-    entraînés sur [2020-01-01, 2025-01-01), Kalman sur [2018-01-01, 2025-01-01)
-    puis état avancé sur le test 2025 — le test 2025 reste réservé.
-  - "production" : utilisé par l'onglet Pipeline réel. Même fenêtre basse,
-    mais entraîné jusqu'à fin 2025 inclus (pas de test réservé) — c'est la
-    "dernière ré-entraînation avec les données 2025" demandée.
+Two model sets, with different training windows:
+  - "backtest"   : used by the Forecast/Benchmark/Monitoring tabs. OLS/SURE
+    trained on [2020-01-01, 2025-01-01), Kalman on [2018-01-01, 2025-01-01)
+    with its state then advanced over the 2025 test — the 2025 test stays
+    held out.
+  - "production" : used by the Live pipeline tab. Same lower bound, but
+    trained through the end of 2025 (no held-out test) — the requested
+    "latest retraining including 2025 data".
 
-`scripts/train_models.py` construit ces artefacts ; `dashboard/services/
-model_store.py` et `pipeline/real_forecast.py` les chargent, et ne
-retombent sur un ré-entraînement à la volée que si le cache est absent.
+`scripts/train_models.py` builds these artifacts; `dashboard/services/
+model_store.py` and `pipeline/real_forecast.py` load them, and only fall
+back to on-the-fly retraining when the cache is absent.
 """
 from __future__ import annotations
 
@@ -22,18 +23,18 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS_DIR = REPO_ROOT / "data" / "models"
 
-OLS_TRAIN_START = "2020-01-01"     # OLS/SURE : on exclut 2018-2019 (trop ancien)
+OLS_TRAIN_START = "2020-01-01"     # OLS/SURE: 2018-2019 excluded (too old)
 SURE_TRAIN_START = "2020-01-01"
-KALMAN_TRAIN_START = "2018-01-01"  # Kalman : historique complet, inchangé
+KALMAN_TRAIN_START = "2018-01-01"  # Kalman: full history, unchanged
 
 BACKTEST_TEST_START = "2025-01-01"
 BACKTEST_TEST_END = "2026-01-01"
 
-# --- Modèles régionaux (Étape C/D) -----------------------------------------
-# Un jeu par région et par usage. Nom de fichier :
+# --- Regional models (Step C/D) --------------------------------------------
+# One set per region and per usage. File name:
 #   data/models/regional/region<code>_<model>_<set>.pkl
-# set ∈ {backtest (hold-out réservé, pour les métriques/dashboard de rejeu),
-#        production (entraîné jusqu'à la dernière donnée, pour la prévision)}.
+# set ∈ {backtest (held-out test, for metrics/replay dashboard),
+#        production (trained through the latest data, for forecasting)}.
 REGIONAL_SUBDIR = "regional"
 
 
@@ -42,16 +43,15 @@ def regional_artifact_name(region_code: int, model: str, artifact_set: str = "ba
 
 
 def _strip_statsmodels_results(obj: Any) -> None:
-    """Retire les données d'entraînement (exog/endog) des objets
-    statsmodels.RegressionResults enfouis dans nos modèles avant sauvegarde.
-    Sans ça, chaque .pkl embarque la matrice de design complète — jusqu'à
-    ~700 Mo pour le système SURE (whitened_result_ porte une matrice
-    (24*T, 24*k)). Vérifié : `.predict(X)` avec un X explicite (notre seul
-    usage post-entraînement) donne un résultat identique avant/après
-    `remove_data()` ; seul `.predict()` sans argument casse (jamais utilisé
-    ici, on passe toujours un `X` explicite)."""
-    # Imports différés : évite un cycle (models/__init__ importe persistence
-    # indirectement via dataset.py, qui est importé par ols/sure/kalman).
+    """Strip the training data (exog/endog) from the statsmodels
+    RegressionResults objects buried inside our models before saving. Without
+    this, each .pkl embeds the full design matrix — up to ~700 MB for the
+    SURE system (whitened_result_ carries a (24*T, 24*k) matrix). Verified:
+    `.predict(X)` with an explicit X (our only post-training usage) returns
+    identical results before/after `remove_data()`; only `.predict()` without
+    arguments breaks (never used here, an explicit `X` is always passed)."""
+    # Deferred imports: avoids a cycle (models/__init__ imports persistence
+    # indirectly through dataset.py, which is imported by ols/sure/kalman).
     from models.kalman import HourlyKalmanSURModel
     from models.ols import HourlyOLSModel
     from models.sure import HourlySUREModel

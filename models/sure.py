@@ -1,25 +1,24 @@
-"""Benchmark 2 : système SURE (Seemingly Unrelated Regressions, Zellner 1962)
-sur les 24 équations horaires, estimé par FGLS avec `statsmodels`.
+"""Benchmark 2: SURE system (Seemingly Unrelated Regressions, Zellner 1962)
+over the 24 hourly equations, estimated by FGLS with `statsmodels`.
 
-Principe : les 24 équations partagent le même jeu de prédicteurs mais des
-coefficients propres à chaque heure (comme le modèle OLS). La différence est
-que leurs résidus, pris à un même jour, sont corrélés (chocs journaliers non
-observés communs à toutes les heures — météo fine, comportement inhabituel,
-jour férié mal capté, etc.). SURE exploite cette corrélation contemporaine
-pour gagner en efficacité par rapport à 24 OLS indépendants (Aitken/FGLS).
+Principle: the 24 equations share the same predictor set but hour-specific
+coefficients (like the OLS model). The difference is that their residuals,
+taken on the same day, are correlated (unobserved daily shocks common to all
+hours — fine-grained weather, unusual behavior, poorly captured holidays,
+etc.). SURE exploits this contemporaneous correlation to gain efficiency over
+24 independent OLS regressions (Aitken/FGLS).
 
-Implémentation — pourquoi le blanchiment est fait à la main plutôt que via
-`statsmodels.GLS(sigma=...)` :
-    La matrice de covariance complète du système empilé fait (24T) x (24T)
-    (T = nombre de jours). Avec T de l'ordre de quelques milliers, cette
-    matrice est bien trop grande pour être construite ou inversée en dense
-    (des dizaines de Go). Mais en ordonnant les observations "jour d'abord,
-    heure ensuite", cette covariance est bloc-diagonale avec T blocs
-    identiques égaux à Sigma (24x24, la covariance contemporaine entre
-    équations). On peut donc blanchir le système jour par jour avec
-    P = chol(Sigma)^-1 (P Sigma P' = I), sans jamais former la matrice
-    complète, puis appeler `statsmodels.OLS` sur le système empilé blanchi :
-    c'est exactement l'estimateur FGLS de Zellner, calculé efficacement.
+Implementation — why the whitening is done by hand rather than through
+`statsmodels.GLS(sigma=...)`:
+    The full covariance matrix of the stacked system is (24T) x (24T)
+    (T = number of days). With T in the thousands, that matrix is far too
+    large to build or invert densely (tens of GB). But when observations are
+    ordered "day first, hour second", this covariance is block-diagonal with
+    T identical blocks equal to Sigma (24x24, the contemporaneous covariance
+    across equations). The system can therefore be whitened day by day with
+    P = chol(Sigma)^-1 (P Sigma P' = I), without ever forming the full
+    matrix, then `statsmodels.OLS` is called on the stacked whitened system:
+    this is exactly Zellner's FGLS estimator, computed efficiently.
 """
 from __future__ import annotations
 
@@ -37,13 +36,13 @@ class HourlySUREModel:
     def __init__(self, predictor_cols: list[str] = PREDICTOR_COLUMNS):
         self.predictor_cols = list(predictor_cols)
         self.k = len(self.predictor_cols)
-        self.sigma_: np.ndarray | None = None          # (24, 24) covariance contemporaine des résidus
-        self.beta_: np.ndarray | None = None            # (24, k) coefficients par heure
+        self.sigma_: np.ndarray | None = None          # (24, 24) contemporaneous residual covariance
+        self.beta_: np.ndarray | None = None            # (24, k) coefficients per hour
         self.stage1_results_: dict[int, sm.regression.linear_model.RegressionResultsWrapper] = {}
-        self.whitened_result_ = None                     # résultat statsmodels du système empilé/blanchi
-        # Variance des résidus stage-1, extraite à l'entraînement (cf.
-        # HourlyOLSModel.mse_resid_ : `models.persistence` retire les
-        # données brutes des résultats statsmodels avant sauvegarde).
+        self.whitened_result_ = None                     # statsmodels result of the stacked/whitened system
+        # Stage-1 residual variance, extracted at fit time (cf.
+        # HourlyOLSModel.mse_resid_: `models.persistence` strips the raw data
+        # from statsmodels results before saving).
         self.stage1_resid_var_: dict[int, float] = {}
 
     def fit(self, train_per_hour: dict[int, pd.DataFrame], target_col: str = TARGET_COLUMN) -> "HourlySUREModel":
@@ -51,13 +50,13 @@ class HourlySUREModel:
         dates = train_per_hour[0].index
         for h in hours:
             if not train_per_hour[h].index.equals(dates):
-                raise ValueError("panel non équilibré entre équations : utiliser build_hourly_equations()")
+                raise ValueError("panel not balanced across equations: use build_hourly_equations()")
         T = len(dates)
 
         Y = np.column_stack([train_per_hour[h][target_col].to_numpy() for h in hours])          # (T, 24)
         X = np.stack([train_per_hour[h][self.predictor_cols].to_numpy() for h in hours], axis=1)  # (T, 24, k)
 
-        # --- Étape 1 : OLS équation par équation -> résidus -> Sigma ---
+        # --- Stage 1: equation-by-equation OLS -> residuals -> Sigma ---
         resid = np.empty((T, N_HOURS))
         for h in hours:
             res = sm.OLS(Y[:, h], X[:, h, :]).fit()
@@ -66,7 +65,7 @@ class HourlySUREModel:
             self.stage1_resid_var_[h] = float(np.var(resid[:, h]))
         self.sigma_ = (resid.T @ resid) / T
 
-        # --- Étape 2 : blanchiment P = chol(Sigma, lower)^-1, puis OLS empilé ---
+        # --- Stage 2: whitening P = chol(Sigma, lower)^-1, then stacked OLS ---
         L = cholesky(self.sigma_, lower=True)
         P = solve_triangular(L, np.eye(N_HOURS), lower=True)  # P Sigma P' = I
 
@@ -83,7 +82,7 @@ class HourlySUREModel:
 
     def predict(self, per_hour: dict[int, pd.DataFrame]) -> dict[int, pd.Series]:
         if self.beta_ is None:
-            raise RuntimeError("fit() doit être appelé avant predict()")
+            raise RuntimeError("fit() must be called before predict()")
         preds = {}
         for h, frame in per_hour.items():
             X = frame[self.predictor_cols].to_numpy()
@@ -95,6 +94,6 @@ class HourlySUREModel:
         return pd.DataFrame(self.beta_, index=range(N_HOURS), columns=self.predictor_cols)
 
     def sigma_frame(self) -> pd.DataFrame:
-        """Matrice de covariance contemporaine (24x24) estimée en étape 1, pour inspection
-        (ex. corrélation résiduelle entre heures proches vs. heures éloignées)."""
+        """Contemporaneous covariance matrix (24x24) estimated in stage 1, for
+        inspection (e.g. residual correlation between nearby vs distant hours)."""
         return pd.DataFrame(self.sigma_, index=range(N_HOURS), columns=range(N_HOURS))

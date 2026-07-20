@@ -1,7 +1,7 @@
-"""Persistance légère (SQLite) des prévisions produites par le pipeline réel,
-pour pouvoir les comparer plus tard aux valeurs réelles (une fois publiées)
-et construire un vrai historique de performance — pas un backtest rejoué,
-de vraies prévisions faites à l'aveugle sur le futur au moment du run.
+"""Lightweight persistence (SQLite) of the forecasts produced by the live
+pipeline, so they can later be compared with actual values (once published)
+to build a genuine performance history — not a replayed backtest, but real
+forecasts made blind about the future at run time.
 """
 from __future__ import annotations
 
@@ -24,20 +24,38 @@ CREATE TABLE IF NOT EXISTS forecasts (
     day_j TEXT NOT NULL,
     day_g TEXT NOT NULL,
     timestamp TEXT NOT NULL,
-    heure_locale INTEGER NOT NULL,
+    local_hour INTEGER NOT NULL,
     kalman REAL,
     ols REAL,
     sure REAL,
-    source_meteo TEXT,
+    weather_source TEXT,
     PRIMARY KEY (run_id, timestamp)
 );
 """
+
+# v1.0 stored French column names; renamed in v1.1. Applied once per
+# connection open, harmless afterwards (no-op when columns are already new).
+_MIGRATIONS = (
+    ("heure_locale", "local_hour"),
+    ("source_meteo", "weather_source"),
+)
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(forecasts)")}
+    for old, new in _MIGRATIONS:
+        if old in cols and new not in cols:
+            conn.execute(f"ALTER TABLE forecasts RENAME COLUMN {old} TO {new}")
+    # v1.0 also stored French values in weather_source.
+    conn.execute("UPDATE forecasts SET weather_source='forecast' WHERE weather_source='prevue'")
+    conn.execute("UPDATE forecasts SET weather_source='observed' WHERE weather_source='observee'")
 
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(_SCHEMA)
+    _migrate_columns(conn)
     return conn
 
 
@@ -51,7 +69,7 @@ def save_forecast(result: RealForecastResult) -> str:
     df["timestamp"] = df["timestamp"].astype(str)
 
     with _connect() as conn:
-        df[["run_id", "generated_at", "day_j", "day_g", "timestamp", "heure_locale", "kalman", "ols", "sure", "source_meteo"]].to_sql(
+        df[["run_id", "generated_at", "day_j", "day_g", "timestamp", "local_hour", "kalman", "ols", "sure", "weather_source"]].to_sql(
             "forecasts", conn, if_exists="append", index=False
         )
     return run_id
@@ -72,9 +90,9 @@ def load_all_forecasts() -> pd.DataFrame:
 
 
 def reconcile_with_actuals() -> pd.DataFrame:
-    """Rejoint les prévisions enregistrées avec les valeurs réelles
-    aujourd'hui disponibles (reconstruction régionale fraîche, éventuellement
-    encore incomplète pour les runs très récents — cf. colonne `a_verifier`)."""
+    """Join recorded forecasts with the actual values available today (fresh
+    regional reconstruction, possibly still incomplete for very recent runs —
+    see the `pending` column)."""
     from pipeline.gas_freshness import fetch_fresh_gas_total
 
     forecasts = load_all_forecasts()
@@ -89,8 +107,8 @@ def reconcile_with_actuals() -> pd.DataFrame:
         actual = pd.Series(dtype=float)
 
     forecasts = forecasts.set_index("timestamp")
-    forecasts["reel"] = actual.reindex(forecasts.index)
-    forecasts["a_verifier"] = forecasts["reel"].isna()
+    forecasts["actual"] = actual.reindex(forecasts.index)
+    forecasts["pending"] = forecasts["actual"].isna()
     for model in ("kalman", "ols", "sure"):
-        forecasts[f"erreur_abs_{model}"] = (forecasts[model] - forecasts["reel"]).abs()
+        forecasts[f"abs_error_{model}"] = (forecasts[model] - forecasts["actual"]).abs()
     return forecasts.reset_index()

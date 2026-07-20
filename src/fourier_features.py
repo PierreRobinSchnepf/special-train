@@ -1,9 +1,9 @@
-"""Bloc saisonnier (Fourier) du Tableau 1, avec dédoublement jours ouvrés / week-end.
+"""Seasonal (Fourier) block of Table 1, split between weekdays and weekends.
 
-Pour chaque harmonique s, cos_s/sin_s sont calculés à partir du jour de
-l'année civil français (Europe/Paris), puis masqués à 0 selon que l'heure
-tombe un jour ouvré (WD) ou un week-end (WE). Chaque timestamp porte une
-valeur non nulle dans exactement un des deux jeux de colonnes.
+For each harmonic s, cos_s/sin_s are computed from the French civil day of
+year (Europe/Paris), then masked to 0 depending on whether the hour falls on
+a weekday (WD) or a weekend (WE). Each timestamp carries a non-zero value in
+exactly one of the two column sets.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def compute_fourier_features(
 
     local = index.tz_convert(calendar_tz)
     day_of_year = local.dayofyear.to_numpy(dtype=float)
-    is_weekend = local.dayofweek.to_numpy() >= 5  # 5=samedi, 6=dimanche
+    is_weekend = local.dayofweek.to_numpy() >= 5  # 5=Saturday, 6=Sunday
 
     cols: dict[str, np.ndarray] = {}
     for s in harmonics:
@@ -35,7 +35,7 @@ def compute_fourier_features(
         cols[f"cos{s}_WE"] = np.where(is_weekend, cos_s, 0.0)
         cols[f"sin{s}_WE"] = np.where(is_weekend, sin_s, 0.0)
 
-    # Ordre demandé par la spec : cos1..cos4 puis sin1..sin4, pour WD puis WE.
+    # Column order required by the spec: cos1..cos4 then sin1..sin4, WD then WE.
     ordered_columns = (
         [f"cos{s}_WD" for s in harmonics]
         + [f"sin{s}_WD" for s in harmonics]

@@ -1,9 +1,9 @@
-"""Orchestrateur principal (étapes 1→5) : ingestion, alignement, features, export.
+"""Main orchestrator (steps 1→5): ingestion, alignment, features, export.
 
-Usage :
-    python build_dataset.py                      # run complet 2018-présent
-    python build_dataset.py --sample-months 1     # 1 mois pour test rapide
-    python build_dataset.py --skip-fetch          # réutilise le cache existant
+Usage:
+    python scripts/build_dataset.py                      # full 2018-present run
+    python scripts/build_dataset.py --sample-months 1     # 1 month for a quick test
+    python scripts/build_dataset.py --skip-fetch          # reuse the existing cache
 """
 from __future__ import annotations
 
@@ -14,9 +14,12 @@ import logging
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import pandas as pd
 
+from scripts.fetch_data import fetch_gas, fetch_holidays, fetch_meteo, fetch_school_holidays
 from src.calendar_features import (
     compute_end_of_year_flag,
     compute_off_peak_flag,
@@ -25,7 +28,6 @@ from src.calendar_features import (
 from src.config import load_config, resolve_path
 from src.fourier_features import compute_fourier_features
 from src.thermal_features import compute_temp_smo, compute_x1_heating, compute_x2_smo_heating
-from fetch_data import fetch_gas, fetch_holidays, fetch_meteo, fetch_school_holidays
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +38,7 @@ logger = logging.getLogger("build_dataset")
 
 
 # ---------------------------------------------------------------------------
-# Chargement des sources brutes
+# Raw source loading
 # ---------------------------------------------------------------------------
 
 def load_gas(config: dict) -> pd.Series:
@@ -44,7 +46,7 @@ def load_gas(config: dict) -> pd.Series:
     raw_dir = resolve_path(config["output"]["raw_dir"]) / "gas"
     files = sorted(raw_dir.glob("gas_*.csv"))
     if not files:
-        raise FileNotFoundError(f"no gas files found in {raw_dir} — run fetch_data.py first")
+        raise FileNotFoundError(f"no gas files found in {raw_dir} — run scripts/fetch_data.py first")
 
     frames = []
     for f in files:
@@ -56,11 +58,10 @@ def load_gas(config: dict) -> pd.Series:
     gas = gas.drop_duplicates(subset=[gas_cfg["datetime_field"]])
     gas = gas.set_index(gas_cfg["datetime_field"]).sort_index()
 
-    # Le gaz est publié à la maille horaire pleine ; les points :30 sont une
-    # structure héritée de la table électricité (demi-horaire) et sont
-    # toujours vides pour le gaz — on les élimine explicitement plutôt que
-    # de s'appuyer sur le NaN (qui doit rester réservé aux vraies données
-    # manquantes sur la maille horaire).
+    # Gas is published at the full-hour granularity; the :30 points are a
+    # structure inherited from the electricity table (half-hourly) and are
+    # always empty for gas — they are removed explicitly rather than relying
+    # on NaN (which must stay reserved for genuinely missing hourly data).
     gas = gas[gas.index.minute == 0]
 
     series = gas[gas_cfg["value_field"]].rename("y_gas_mw")
@@ -75,12 +76,12 @@ def _pick_best_station(df: pd.DataFrame, station_field: str, value_field: str) -
 
 
 def load_per_department_temp(config: dict) -> tuple[dict[str, pd.Series], dict[str, float]]:
-    """Charge la série de température (poste le mieux couvert) pour chaque
-    département configuré, indexée UTC. Écrit le log de sélection de poste.
-    Base commune aux agrégations nationale ET régionale (Étape B) : la sélection
-    de poste et la pondération population sont ainsi partagées, pas dupliquées.
+    """Load the temperature series (best-covered station) for each configured
+    department, UTC-indexed. Writes the station-selection log. Shared basis
+    for BOTH the national and regional aggregations (Step B): station
+    selection and population weighting are shared, not duplicated.
 
-    Retourne (per_dept_series, weights) où les clés sont les codes département.
+    Returns (per_dept_series, weights) keyed by department code.
     """
     meteo_cfg = config["meteo"]
     raw_dir = resolve_path(config["output"]["raw_dir"]) / "meteo"
@@ -143,11 +144,11 @@ def load_per_department_temp(config: dict) -> tuple[dict[str, pd.Series], dict[s
 
 
 def renormalized_weighted_mean(wide_filled: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
-    """Moyenne pondérée par ligne, avec renormalisation des poids sur les seules
-    colonnes disponibles à chaque instant (pour ne pas biaiser la moyenne quand
-    une station manque). NaN si aucune colonne disponible sur la ligne. Utilisé
-    à l'identique pour le national (toutes les colonnes) et le régional (colonnes
-    d'une région)."""
+    """Row-wise weighted mean, with weights renormalized over the columns
+    available at each instant (so the mean is not biased when a station is
+    missing). NaN when no column is available on the row. Used identically
+    for the national aggregate (all columns) and the regional one (a
+    region's columns)."""
     weight_series = pd.Series(weights)
     available_mask = wide_filled.notna()
     row_weights = available_mask.mul(weight_series, axis=1)
@@ -163,8 +164,8 @@ def load_meteo_national(config: dict) -> pd.Series:
     per_dept_series, weights = load_per_department_temp(config)
 
     wide = pd.DataFrame(per_dept_series)
-    # Comblement des trous courts (capteur hors ligne quelques heures) avant
-    # toute agrégation ou lissage — trous plus longs laissés en NaN.
+    # Fill short gaps (sensor offline for a few hours) before any aggregation
+    # or smoothing — longer gaps are left as NaN.
     max_gap = meteo_cfg["max_ffill_gap_hours"]
     wide_filled = wide.ffill(limit=max_gap)
 
@@ -205,7 +206,7 @@ def load_school_holidays(config: dict) -> set[dt.date]:
 
 
 # ---------------------------------------------------------------------------
-# Assemblage
+# Assembly
 # ---------------------------------------------------------------------------
 
 def build_master_index(config: dict, gas: pd.Series, temp: pd.Series) -> pd.DatetimeIndex:
@@ -294,9 +295,9 @@ def run_qc(df: pd.DataFrame, index: pd.DatetimeIndex) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skip-fetch", action="store_true", help="réutilise le cache data/raw/ existant")
-    parser.add_argument("--force-fetch", action="store_true", help="force le retéléchargement de tout")
-    parser.add_argument("--sample-months", type=int, default=None, help="restreint la fenêtre de dates pour un test rapide")
+    parser.add_argument("--skip-fetch", action="store_true", help="reuse the existing data/raw/ cache")
+    parser.add_argument("--force-fetch", action="store_true", help="force re-downloading everything")
+    parser.add_argument("--sample-months", type=int, default=None, help="restrict the date range for a quick test")
     args = parser.parse_args(argv)
 
     config = load_config()

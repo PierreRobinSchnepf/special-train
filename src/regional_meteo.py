@@ -1,17 +1,17 @@
-"""Température PAR RÉGION (Étape B du modèle région par région).
+"""PER-REGION temperature (Step B of the region-by-region model).
 
-Réutilise exactement la même mécanique que la température nationale
-(`build_dataset.load_per_department_temp` + `renormalized_weighted_mean`) :
-sélection automatique du poste le mieux couvert par département, comblement des
-trous courts, puis moyenne pondérée population. La seule différence est le
-regroupement : au lieu d'agréger les 16 départements en une seule série
-nationale, on les regroupe par `region_code` (INSEE) pour produire une
-température par région, alignée sur les 12 régions gazières.
+Reuses exactly the same machinery as the national temperature
+(`build_dataset.load_per_department_temp` + `renormalized_weighted_mean`):
+automatic selection of the best-covered station per department, short-gap
+filling, then population-weighted average. The only difference is the
+grouping: instead of aggregating the 16 departments into a single national
+series, they are grouped by `region_code` (INSEE) to produce one temperature
+per region, aligned with the 12 gas regions.
 
-Chaque région gazière est couverte par >= 1 département du panier météo (cf.
-config.yaml § meteo.stations, `region_code`). Les départements dont le
-`region_code` ne correspond à aucune des 12 régions gazières sont ignorés (il
-n'y en a pas aujourd'hui, mais la fonction reste robuste si le panier évolue).
+Every gas region is covered by >= 1 department of the weather basket (see
+config.yaml § meteo.stations, `region_code`). Departments whose `region_code`
+matches none of the 12 gas regions are ignored (there are none today, but the
+function stays robust if the basket evolves).
 """
 from __future__ import annotations
 
@@ -19,28 +19,28 @@ import logging
 
 import pandas as pd
 
-from build_dataset import load_per_department_temp, renormalized_weighted_mean
+from scripts.build_dataset import load_per_department_temp, renormalized_weighted_mean
 
 logger = logging.getLogger(__name__)
 
 
 def load_meteo_regional(config: dict) -> pd.DataFrame:
-    """Température horaire par région, indexée UTC. Retourne un DataFrame
-    (index UTC) x (code_region int), en °C. Chaque colonne est la moyenne
-    pondérée population des stations de la région, avec renormalisation des
-    poids sur les stations disponibles à chaque heure.
+    """Hourly temperature per region, UTC-indexed. Returns a DataFrame
+    (UTC index) x (code_region int), in °C. Each column is the population-
+    weighted average of the region's stations, with weights renormalized over
+    the stations available at each hour.
     """
     meteo_cfg = config["meteo"]
     per_dept_series, weights = load_per_department_temp(config)
 
-    # dep -> region_code, depuis la config (source unique de vérité).
+    # dep -> region_code, from config (single source of truth).
     dep_to_region: dict[str, int] = {}
     for station_cfg in meteo_cfg["stations"]:
         code = station_cfg.get("region_code")
         if code is not None:
             dep_to_region[station_cfg["department"]] = int(code)
 
-    # Régions gazières attendues (la cible régionale ne couvre qu'elles).
+    # Expected gas regions (the regional target only covers these).
     gas_regions = {int(k) for k in config["gas_regional"]["regions"]}
 
     wide = pd.DataFrame(per_dept_series)

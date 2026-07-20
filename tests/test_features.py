@@ -12,7 +12,7 @@ from src.thermal_features import compute_temp_smo, compute_x1_heating, compute_x
 
 
 # ---------------------------------------------------------------------------
-# Bloc thermique
+# Thermal block
 # ---------------------------------------------------------------------------
 
 def test_x1_heating_clips_at_zero():
@@ -54,7 +54,7 @@ def test_x1_reacts_immediately_to_cold_snap():
 
 
 # ---------------------------------------------------------------------------
-# Bloc Fourier
+# Fourier block
 # ---------------------------------------------------------------------------
 
 def test_fourier_masks_weekday_vs_weekend():
@@ -90,7 +90,7 @@ def test_fourier_utc_late_hours_use_next_paris_day():
 
 
 # ---------------------------------------------------------------------------
-# Bloc calendaire
+# Calendar block
 # ---------------------------------------------------------------------------
 
 def test_weekday_flags_are_mutually_exclusive_on_named_days():
@@ -115,7 +115,7 @@ def test_off_peak_combines_holiday_school_and_end_of_year():
     index = pd.DatetimeIndex(
         [
             "2024-07-15T12:00:00Z",  # ordinary Monday
-            "2024-05-01T12:00:00Z",  # 1er mai, jour ferie
+            "2024-05-01T12:00:00Z",  # May 1st, public holiday
             "2024-12-26T12:00:00Z",  # end of year window
         ],
         tz="UTC",

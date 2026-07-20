@@ -1,10 +1,10 @@
-"""Données pour la carte choroplèthe régionale de l'écran d'accueil.
+"""Data for the regional choropleth map on the home screen.
 
-Lit le fond de carte GeoJSON (asset committé) et le tableau d'erreur par région
-(métriques du jeu backtest, `data/processed/regional/metrics_regional.json`).
-La carte colore chaque région par le **biais signé** (réel vs prévu) du modèle
-Kalman sur la fenêtre de test — l'indicateur demandé "différence entre
-consommation réelle et consommation prédite".
+Reads the GeoJSON base map (committed asset) and the per-region error table
+(backtest-set metrics, `data/processed/regional/metrics_regional.json`).
+The map colors each region by the Kalman model's **signed bias** (actual vs
+predicted) over the test window — the requested "difference between actual
+and predicted consumption" indicator.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ GEOJSON_PATH = _ASSETS / "regions_metropole.geojson"
 def load_geojson() -> dict:
     with open(GEOJSON_PATH, encoding="utf-8") as f:
         gj = json.load(f)
-    # Homogénéise la clé de jointure : featureidkey = properties.code (str).
+    # Normalize the join key: featureidkey = properties.code (str).
     for feat in gj["features"]:
         feat["properties"]["code"] = str(feat["properties"]["code"])
     return gj
@@ -34,9 +34,9 @@ def _metrics_path(config: dict) -> Path:
 
 
 def regional_error_table(config: dict) -> pd.DataFrame:
-    """Un enregistrement par région : code, libellé, et métriques test du Kalman
-    (biais signé %, MAPE %, RMSE MW). Retourne un DataFrame vide si les métriques
-    n'ont pas encore été générées (train_regional_models.py)."""
+    """One record per region: code, label, and the Kalman test metrics
+    (signed bias %, MAPE %, RMSE MW). Returns an empty DataFrame when the
+    metrics have not been generated yet (train_regional_models.py)."""
     path = _metrics_path(config)
     if not path.exists():
         return pd.DataFrame(columns=["code", "region", "bias_pct", "mape", "rmse"])

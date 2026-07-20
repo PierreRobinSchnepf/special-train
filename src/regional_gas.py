@@ -1,29 +1,28 @@
-"""Ingestion et reconstruction de la consommation gaz RÉGIONALE (cible du
-modèle région par région).
+"""Ingestion and reconstruction of REGIONAL gas consumption (target of the
+region-by-region model).
 
-Le dataset national `consommation-quotidienne-brute` n'est pas ventilé par
-région. On reconstitue la consommation par région en sommant, par région, deux
-datasets ODRÉ régionaux :
-  - `conso-journa-industriel-grtgazterega`          (clients industriels)
-  - `courbe-de-charge-eldgrd-regional-grtgaz-terega` (distributions publiques, GRD/ELD)
+The national dataset `consommation-quotidienne-brute` has no regional
+breakdown. Per-region consumption is reconstructed by summing, per region,
+two regional ODRÉ datasets:
+  - `conso-journa-industriel-grtgazterega`          (industrial customers)
+  - `courbe-de-charge-eldgrd-regional-grtgaz-terega` (public distribution, DSO/LDC)
 
-C'est la même paire que `pipeline/gas_freshness.py`, à une différence près : ce
-module **garde la maille région** (`code_region`) au lieu de tout sommer pour
-reconstituer un total national. La mécanique de parsing est identique et
-partage les mêmes propriétés vérifiées empiriquement :
+This is the same pair as `pipeline/gas_freshness.py`, with one difference:
+this module **keeps the regional granularity** (`code_region`) instead of
+summing everything into a national total. The parsing logic is identical and
+shares the same empirically verified properties:
 
-- format LARGE : une colonne par heure (`06_00`, `07_00`, ... ; les deux
-  datasets ont des conventions de nommage internes incohérentes — `00_00_00`
-  vs `07_00` — d'où le regex tolérant `^(\\d{2})_00`) ;
-- heure **LOCALE Europe/Paris** (pas UTC, pas de décalage "jour gazier") :
-  conversion locale -> UTC obligatoire avant toute fusion avec le reste du
-  pipeline (tout en UTC) ;
-- plusieurs lignes par (date, région) : un par opérateur (NaTran + Teréga) et
-  par secteur d'activité — on **somme toutes ces lignes** pour obtenir le total
-  régional.
+- WIDE format: one column per hour (`06_00`, `07_00`, ...; the two datasets
+  use inconsistent internal naming conventions — `00_00_00` vs `07_00` —
+  hence the tolerant regex `^(\\d{2})_00`);
+- **LOCAL Europe/Paris time** (not UTC, no "gas day" offset): local -> UTC
+  conversion is mandatory before any merge with the rest of the pipeline
+  (which is all UTC);
+- several rows per (date, region): one per operator (NaTran + Teréga) and per
+  activity sector — **all these rows are summed** to get the regional total.
 
-On indexe toujours sur le `code_region` numérique (stable), jamais sur le
-libellé texte (qui varie entre les deux datasets : "Grand-Est"/"Grand Est",
+Always index on the numeric `code_region` (stable), never on the text label
+(which varies between the two datasets: "Grand-Est"/"Grand Est",
 "Ile-de-France"/"Île-de-France"...).
 """
 from __future__ import annotations
@@ -46,7 +45,7 @@ _HOUR_COL_RE = re.compile(r"^(\d{2})_00")
 
 
 # ---------------------------------------------------------------------------
-# Étape 1 : ingestion brute (cache idempotent, par dataset et par année)
+# Step 1: raw ingestion (idempotent cache, per dataset and per year)
 # ---------------------------------------------------------------------------
 
 def _raw_dir(config: dict) -> Path:
@@ -58,10 +57,10 @@ def _export_url(config: dict, dataset_id: str) -> str:
 
 
 def latest_available_source_day(config: dict) -> dt.date | None:
-    """Interroge ODRÉ pour le dernier jour publié dans la SOURCE régionale (les
-    deux datasets se mettent à jour ~tous les 15-20 j). Retourne le min des deux
-    max (un total complet a besoin des deux). Sert au bouton "actualiser" pour
-    savoir s'il y a du neuf à télécharger sans tout re-fetcher."""
+    """Query ODRÉ for the latest day published in the regional SOURCE (both
+    datasets update every ~15-20 days). Returns the min of the two maxima (a
+    complete total needs both). Used by the "refresh" button to know whether
+    there is anything new to download without re-fetching everything."""
     import requests
 
     reg_cfg = config["gas_regional"]
@@ -87,9 +86,9 @@ def fetch_regional_gas(
     force: bool = False,
     refresh_current_year: bool = True,
 ) -> None:
-    """Télécharge les deux datasets régionaux par chunk annuel dans
-    data/raw/<raw_subdir>/. Idempotent (skip si déjà en cache), sauf l'année en
-    cours qui est retéléchargée (données encore provisoires), comme fetch_gas.
+    """Download both regional datasets in yearly chunks into
+    data/raw/<raw_subdir>/. Idempotent (skips cached years), except the current
+    year which is re-downloaded (data still provisional), like fetch_gas.
     """
     reg_cfg = config["gas_regional"]
     raw_dir = _raw_dir(config)
@@ -125,7 +124,7 @@ def fetch_regional_gas(
 
 
 # ---------------------------------------------------------------------------
-# Étape 2 : parsing wide (heure locale) -> long UTC, par région
+# Step 2: wide (local time) -> long UTC parsing, per region
 # ---------------------------------------------------------------------------
 
 def _hour_columns(df: pd.DataFrame) -> dict[str, int]:
@@ -133,10 +132,10 @@ def _hour_columns(df: pd.DataFrame) -> dict[str, int]:
 
 
 def _wide_to_regional_utc(df: pd.DataFrame, region_code_field: str) -> pd.DataFrame:
-    """Convertit un dataframe LARGE (heure locale) en dataframe indexé par
-    timestamp UTC, une colonne par `code_region`, valeur = somme sur opérateurs
-    et secteurs. Les heures ambiguës/inexistantes (transitions DST) sont
-    abandonnées plutôt que devinées.
+    """Convert a WIDE dataframe (local time) into a dataframe indexed by UTC
+    timestamp, one column per `code_region`, value = sum over operators and
+    sectors. Ambiguous/nonexistent hours (DST transitions) are dropped rather
+    than guessed.
     """
     hour_cols = _hour_columns(df)
     if not hour_cols or region_code_field not in df.columns:
@@ -154,10 +153,10 @@ def _wide_to_regional_utc(df: pd.DataFrame, region_code_field: str) -> pd.DataFr
     long_df = pd.concat(long_parts, ignore_index=True).dropna(subset=["value", "code_region"])
     long_df["code_region"] = long_df["code_region"].astype(int)
 
-    # Somme sur opérateurs + secteurs, par (région, heure locale).
+    # Sum over operators + sectors, per (region, local hour).
     grouped = long_df.groupby(["local_ts", "code_region"])["value"].sum().unstack("code_region")
 
-    # Heure locale Europe/Paris -> UTC.
+    # Europe/Paris local time -> UTC.
     localized_idx = grouped.index.tz_localize(
         CALENDAR_TZ, ambiguous="NaT", nonexistent="NaT"
     )
@@ -167,8 +166,8 @@ def _wide_to_regional_utc(df: pd.DataFrame, region_code_field: str) -> pd.DataFr
 
 
 def _load_one_dataset(config: dict, label: str) -> pd.DataFrame:
-    """Charge et concatène tous les CSV annuels cachés d'un dataset régional,
-    retourne un dataframe UTC (index) x code_region (colonnes)."""
+    """Load and concatenate every cached yearly CSV of one regional dataset;
+    return a dataframe UTC (index) x code_region (columns)."""
     reg_cfg = config["gas_regional"]
     raw_dir = _raw_dir(config)
     files = sorted(raw_dir.glob(f"{label}_*.csv"))
@@ -192,15 +191,15 @@ def _load_one_dataset(config: dict, label: str) -> pd.DataFrame:
 
 
 def _mask_isolated_dips(df: pd.DataFrame, dip_fraction: float) -> pd.DataFrame:
-    """Remplace par NaN toute valeur < dip_fraction x min(voisin précédent,
-    voisin suivant) : un effondrement d'une seule heure entouré de valeurs
-    normales est physiquement impossible pour la conso gaz (inertie thermique),
-    donc un artefact de la source (cf. glitch DST de mars). Ne touche pas les
-    vrais creux (entourés d'heures également basses). Une valeur au bord (sans
-    l'un des deux voisins) n'est jamais masquée (comparaison NaN -> False)."""
+    """Replace with NaN any value < dip_fraction x min(previous neighbor, next
+    neighbor): a one-hour collapse surrounded by normal values is physically
+    impossible for gas consumption (thermal inertia), hence a source artefact
+    (cf. the March DST glitch). Genuine troughs (surrounded by equally low
+    hours) are untouched. An edge value (missing one of its two neighbors) is
+    never masked (NaN comparison -> False)."""
     prev = df.shift(1)
     nxt = df.shift(-1)
-    neighbor_min = np.minimum(prev, nxt)   # NaN si un voisin manque
+    neighbor_min = np.minimum(prev, nxt)   # NaN if a neighbor is missing
     dip = df < (dip_fraction * neighbor_min)
     n = int(dip.to_numpy().sum())
     if n:
@@ -209,20 +208,20 @@ def _mask_isolated_dips(df: pd.DataFrame, dip_fraction: float) -> pd.DataFrame:
 
 
 def load_regional_gas(config: dict) -> pd.DataFrame:
-    """Cible régionale : consommation totale (industriel + distribution) par
-    région, au pas horaire UTC. Retourne un DataFrame indexé par timestamp UTC,
-    une colonne par `code_region` (int), en MW.
+    """Regional target: total consumption (industrial + distribution) per
+    region, hourly in UTC. Returns a DataFrame indexed by UTC timestamp, one
+    column per `code_region` (int), in MW.
 
-    industriel + distribution sont additionnés par (région, heure). Une valeur
-    reste NaN si l'une des deux sources manque à cette heure pour cette région
-    (pas de total partiel silencieux) — en pratique la distribution ne démarre
-    qu'à `distribution_start`, donc les heures antérieures sont NaN partout.
+    industrial + distribution are added per (region, hour). A value stays NaN
+    when either source is missing at that hour for that region (no silent
+    partial totals) — in practice distribution only starts at
+    `distribution_start`, so earlier hours are NaN everywhere.
     """
     industrial = _load_one_dataset(config, "industrial")
     distribution = _load_one_dataset(config, "distribution")
 
-    # Union des index et des colonnes (régions), puis somme stricte : NaN si
-    # l'un des deux manque (add sans fill_value propage le NaN).
+    # Union of indexes and columns (regions), then strict sum: NaN whenever
+    # either side is missing (add without fill_value propagates NaN).
     total = industrial.add(distribution)
 
     regions_cfg = {int(k): v for k, v in config["gas_regional"]["regions"].items()}
@@ -232,8 +231,8 @@ def load_regional_gas(config: dict) -> pd.DataFrame:
         logger.warning("regional gas: unexpected region codes ignored: %s", unexpected)
     total = total[sorted(known)]
 
-    # Nettoyage : une conso gaz régionale <= 0 est impossible (trou de source),
-    # puis filtre des chutes isolées d'une heure (artefact DST récurrent).
+    # Cleaning: a regional gas consumption <= 0 is impossible (source gap),
+    # then filter one-hour isolated dips (recurring DST artefact).
     total = total.mask(total <= 0)
     total = _mask_isolated_dips(total, float(config["gas_regional"].get("dip_fraction", 0.5)))
 

@@ -1,15 +1,15 @@
-"""Modèles de benchmark pour la prévision horaire de consommation de gaz.
+"""Benchmark models for hourly gas consumption forecasting.
 
-Deux approches, toutes deux structurées en 24 équations (une par heure locale
-Europe/Paris), avec les mêmes prédicteurs (Tableau 1 du rapport) :
+Two approaches, both structured as 24 equations (one per Europe/Paris local
+hour), sharing the same predictors (Table 1 of the source report):
 
-- `models.ols.HourlyOLSModel`   : 24 régressions OLS indépendantes.
-- `models.sure.HourlySUREModel` : même système estimé conjointement par FGLS
-  (Seemingly Unrelated Regressions, Zellner 1962), qui exploite la
-  corrélation contemporaine des résidus entre équations (un même jour).
+- `models.ols.HourlyOLSModel`   : 24 independent OLS regressions.
+- `models.sure.HourlySUREModel` : the same system estimated jointly by FGLS
+  (Seemingly Unrelated Regressions, Zellner 1962), exploiting the
+  contemporaneous correlation of residuals across equations (same day).
 
-Voir `models.dataset` pour la préparation du panel équilibré par jour/heure
-et le split train/test, et `models.metrics` pour RMSE/MAPE.
+See `models.dataset` for the balanced day x hour panel preparation and the
+train/test split, and `models.metrics` for RMSE/MAPE.
 """
 from models.dataset import (
     PREDICTOR_COLUMNS,

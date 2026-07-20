@@ -1,7 +1,7 @@
-"""Bloc calendaire du Tableau 1 : jours de semaine, fin d'année, off-peak.
+"""Calendar block of Table 1: weekday flags, end of year, off-peak.
 
-Toutes les indicatrices sont dérivées de la date civile Europe/Paris (voir
-config.yaml § timezone), pas de la date UTC brute.
+Every indicator is derived from the Europe/Paris civil date (see config.yaml
+§ timezone), never from the raw UTC date.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _local_dates(index: pd.DatetimeIndex, calendar_tz: str) -> pd.Series:
 
 def compute_weekday_flags(index: pd.DatetimeIndex, calendar_tz: str) -> pd.DataFrame:
     local = index.tz_convert(calendar_tz)
-    dow = local.dayofweek  # 0=lundi ... 6=dimanche
+    dow = local.dayofweek  # 0=Monday ... 6=Sunday
     return pd.DataFrame(
         {
             "is_monday": (dow == 0).astype("int8"),
@@ -41,10 +41,10 @@ def compute_end_of_year_flag(
     end_month, end_day = window["end_month"], window["end_day"]
 
     if start_month == end_month:
-        # Fenêtre contenue dans un seul mois (cas config actuel : 24-31 déc.).
+        # Window contained in a single month (current config: Dec 24-31).
         in_window = (local.month == start_month) & (local.day >= start_day) & (local.day <= end_day)
     else:
-        # Fenêtre à cheval sur le nouvel an (ex. 24 déc. -> 5 jan.).
+        # Window straddling the new year (e.g. Dec 24 -> Jan 5).
         in_window = ((local.month == start_month) & (local.day >= start_day)) | (
             (local.month == end_month) & (local.day <= end_day)
         )
@@ -60,9 +60,9 @@ def compute_off_peak_flag(
 ) -> pd.Series:
     """is_off_peak_period = holiday OR any-zone school break OR end_of_year.
 
-    Définition proposée et documentée (le rapport source ne fixe pas de
-    définition opérationnelle univoque) — voir config.yaml
-    § calendar.off_peak_definition et data_dictionary.md.
+    Proposed, documented definition (the source report does not give a single
+    operational definition) — see config.yaml § calendar.off_peak_definition
+    and docs/data-dictionary.md.
     """
     local_dates = _local_dates(index, calendar_tz)
     is_holiday = local_dates.isin(holiday_dates)

@@ -6,11 +6,11 @@ from models.metrics import rmse
 
 
 def _synthetic_panel(n_days, drift_per_day=0.0, seed=0):
-    """24 équations synthétiques, cible strictement positive (compatible log1p),
-    avec un coefficient sur `x0` qui dérive linéairement dans le temps (multiplié
-    par `drift_per_day` * jour), en plus d'un intercept et d'un `x1` stables.
-    Le SUR (coefficient moyen fixe) ne peut pas suivre cette dérive ; le Kalman le
-    devrait, au moins partiellement.
+    """24 synthetic equations, strictly positive target (log1p-compatible),
+    with a coefficient on `x0` drifting linearly over time (multiplied by
+    `drift_per_day` * day), on top of a stable intercept and `x1`. The SUR
+    (fixed average coefficient) cannot track that drift; the Kalman should,
+    at least partially.
     """
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2020-01-01", periods=n_days, freq="D").date
@@ -20,7 +20,7 @@ def _synthetic_panel(n_days, drift_per_day=0.0, seed=0):
     for h in range(24):
         x0 = rng.normal(loc=5, scale=1.0, size=n_days)
         x1 = rng.normal(loc=2, scale=1.0, size=n_days)
-        true_coef0 = 0.05 + drift_per_day * day_idx  # dérive dans le temps
+        true_coef0 = 0.05 + drift_per_day * day_idx  # drifts over time
         log_y = 8.0 + true_coef0 * x0 + 0.1 * x1 + rng.normal(scale=0.01, size=n_days)
         y = np.expm1(log_y)
 
@@ -35,10 +35,10 @@ PREDICTORS = ["x0", "x1", "beta_0"]
 
 
 def test_first_train_prediction_matches_sur_exactly():
-    # Etat initial = 1 (aucun ajustement) => AVANT toute assimilation (premier
-    # pas de l'entraînement), la prédiction du filtre doit être identique à la
-    # baseline SUR pure (H.sum() == H @ ones). Test en boîte grise sur
-    # `_run_kalman` directement pour isoler cette propriété du reste du fit().
+    # Initial state = 1 (no adjustment) => BEFORE any assimilation (first
+    # training step), the filter's prediction must equal the pure SUR
+    # baseline (H.sum() == H @ ones). Gray-box test on `_run_kalman` directly
+    # to isolate this property from the rest of fit().
     train = _synthetic_panel(n_days=500)
     model = HourlyKalmanSURModel(predictor_cols=PREDICTORS, target_col="y").fit(train)
 
@@ -73,17 +73,18 @@ def test_beta_trajectory_starts_near_one_and_has_expected_length():
     model = HourlyKalmanSURModel(predictor_cols=PREDICTORS, target_col="y").fit(train)
 
     traj = model.full_beta_trajectory(hour=10)
-    assert traj.shape == (300, 2)  # p = 2 (x0, x1), beta_0 exclu de l'état
+    assert traj.shape == (300, 2)  # p = 2 (x0, x1), beta_0 excluded from the state
     np.testing.assert_allclose(traj.iloc[0].to_numpy(), 1.0, atol=0.05)
 
 
 def test_kalman_tracks_drift_better_than_static_sur():
-    # Coefficient de x0 dérive linéairement ; sur la fin de la période de test
-    # (loin de la moyenne vue par le SUR), le Kalman doit s'être rapproché de la
-    # vraie valeur et donc mieux prédire que la baseline SUR figée.
+    # The x0 coefficient drifts linearly; at the end of the test period (far
+    # from the average seen by the SUR), the Kalman must have moved toward
+    # the true value and therefore predict better than the frozen SUR
+    # baseline.
     train = _synthetic_panel(n_days=1200, drift_per_day=0.0006)
     test = _synthetic_panel(n_days=300, drift_per_day=0.0006, seed=3)
-    # décale le test pour qu'il continue la dérive du train (mêmes jours logiques)
+    # shift the test so it continues the train drift (same logical days)
     for h in test:
         test[h] = test[h].copy()
 
@@ -94,7 +95,7 @@ def test_kalman_tracks_drift_better_than_static_sur():
 
     h = 10
     y_true = test[h].set_index("utc_ts")["y"]
-    late = y_true.index[-100:]  # fin de la période de test : dérive maximale
+    late = y_true.index[-100:]  # end of the test period: maximal drift
 
     sur_rmse = rmse(y_true.loc[late], sur_pred[h].loc[late])
     kalman_rmse = rmse(y_true.loc[late], kalman_pred[h].loc[late])

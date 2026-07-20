@@ -7,9 +7,9 @@ from models.sure import HourlySUREModel
 
 
 def _synthetic_panel(n_days=400, k=3, seed=0, cross_eq_corr=0.0):
-    """24 équations synthétiques y_h = X_h @ beta_h + e_h, avec corrélation
-    contemporaine `cross_eq_corr` entre les résidus de toutes les équations
-    (même jour). beta_h dépend de h pour que les 24 équations soient distinctes.
+    """24 synthetic equations y_h = X_h @ beta_h + e_h, with contemporaneous
+    correlation `cross_eq_corr` between the residuals of all equations (same
+    day). beta_h depends on h so the 24 equations are distinct.
     """
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2020-01-01", periods=n_days, freq="D").date
@@ -57,17 +57,17 @@ def test_sure_fit_predict_shapes():
 
 
 def test_sure_matches_ols_when_equations_uncorrelated():
-    # Quand les équations sont générées indépendamment, Sigma_hat est
-    # *approximativement* diagonale (bruit d'échantillonnage sur les termes
-    # hors-diagonale, jamais exactement 0) : le FGLS doit rester proche de
-    # l'estimateur OLS équation par équation, sans coïncider exactement.
+    # When the equations are generated independently, Sigma_hat is only
+    # *approximately* diagonal (sampling noise on the off-diagonal terms,
+    # never exactly 0): the FGLS must stay close to the equation-by-equation
+    # OLS estimator, without matching it exactly.
     per_hour, _ = _synthetic_panel(n_days=2000, cross_eq_corr=0.0)
 
     ols = HourlyOLSModel(predictor_cols=["x0", "x1", "x2"]).fit(per_hour, target_col="y")
     sure = HourlySUREModel(predictor_cols=["x0", "x1", "x2"]).fit(per_hour, target_col="y")
 
     off_diag = sure.sigma_ - np.diag(np.diag(sure.sigma_))
-    assert np.abs(off_diag).max() < 0.1  # Sigma_hat quasi diagonale
+    assert np.abs(off_diag).max() < 0.1  # Sigma_hat nearly diagonal
 
     ols_coefs = ols.coefficients().to_numpy()
     sure_coefs = sure.coefficients().to_numpy()

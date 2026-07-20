@@ -1,25 +1,22 @@
-"""Température nationale (actuals + prévision courte échéance) via Open-Meteo.
+"""National temperature (actuals + short-range forecast) via Open-Meteo.
 
-Pourquoi Open-Meteo plutôt que l'API officielle Météo-France : l'API
-officielle (portail-api.meteofrance.fr) demande une inscription manuelle
-(email + validation) qu'un agent ne peut pas faire à la place de
-l'utilisateur. Open-Meteo est gratuit, sans clé, et sert justement les
-prévisions du modèle Météo-France (AROME) pour la France
-(`/v1/meteofrance`) — testé et validé pour ce projet.
+Why Open-Meteo rather than the official Météo-France API: the official API
+(portail-api.meteofrance.fr) requires a manual registration (email +
+validation) that an agent cannot do on the user's behalf. Open-Meteo is free,
+keyless, and serves precisely the Météo-France model forecasts (AROME) for
+France (`/v1/meteofrance`) — tested and validated for this project.
 
-Un seul appel (`past_days` + `forecast_days`) couvre à la fois :
-- les actuals récents, pour combler le trou entre le dernier jour connu de
-  conso gaz ("jour G", cf. `pipeline.gas_freshness`) et aujourd'hui — ces
-  heures sont déjà arrivées, donc c'est de la vraie donnée observée, pas
-  une prévision ;
-- la prévision proprement dite, sur le seul horizon qui en a vraiment
-  besoin (aujourd'hui restant + J+1), largement dans la plage fiable
-  d'une prévision courte échéance.
+A single call (`past_days` + `forecast_days`) covers both:
+- recent actuals, to fill the gap between the last known gas-consumption day
+  ("day G", see `pipeline.gas_freshness`) and today — these hours have
+  already happened, so this is genuinely observed data, not a forecast;
+- the forecast proper, over the only horizon that really needs one (the rest
+  of today + J+1), well within the reliable range of a short-range forecast.
 
-Les stations et leurs poids sont les mêmes que l'entraînement
-(`config.yaml § meteo.stations`) — la seule différence est la source (API
-de prévision vs archive climatologique), pas le panier de stations ni la
-pondération.
+The stations and their weights are the same as in training
+(`config.yaml § meteo.stations`) — the only difference is the source
+(forecast API vs climatological archive), not the station basket nor the
+weighting.
 """
 from __future__ import annotations
 
@@ -42,8 +39,8 @@ def _load_station_coords() -> dict:
 
 
 def fetch_national_temperature(past_days: int, forecast_days: int = 2) -> pd.Series:
-    """Température nationale pondérée (même pondération que l'entraînement),
-    indexée UTC, de `-past_days` à `+forecast_days` autour d'aujourd'hui."""
+    """Weighted national temperature (same weighting as training), UTC-
+    indexed, from `-past_days` to `+forecast_days` around today."""
     coords = _load_station_coords()
     config = load_config()
     weights = {s["department"]: float(s["weight"]) for s in config["meteo"]["stations"]}
@@ -61,7 +58,7 @@ def fetch_national_temperature(past_days: int, forecast_days: int = 2) -> pd.Ser
     resp = requests.get(OPEN_METEO_URL, params=params, timeout=30)
     resp.raise_for_status()
     payload = resp.json()
-    if isinstance(payload, dict):  # une seule station demandée -> pas de liste
+    if isinstance(payload, dict):  # single station requested -> no list
         payload = [payload]
 
     per_station = {}
@@ -77,10 +74,10 @@ def fetch_national_temperature(past_days: int, forecast_days: int = 2) -> pd.Ser
 
 
 def continue_temp_smo(seed_temp_smo: float, new_temp_raw: pd.Series, kappa: float) -> pd.Series:
-    """Poursuit la récursion EWMA (cf. `src.thermal_features.compute_temp_smo`)
-    à partir d'un état existant plutôt que de la réinitialiser à la première
-    valeur de `new_temp_raw` — nécessaire pour raccorder la prévision au
-    dernier `temp_smo` connu du dataset d'entraînement, sans discontinuité."""
+    """Continue the EWMA recursion (see `src.thermal_features.compute_temp_smo`)
+    from an existing state rather than reinitializing it at the first value of
+    `new_temp_raw` — required to join the forecast onto the last known
+    `temp_smo` of the training dataset without a discontinuity."""
     values = new_temp_raw.to_numpy(dtype=float)
     out = np.empty_like(values)
     prev = seed_temp_smo
