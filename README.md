@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="96" height="96" alt="gas-hourly-forecast logo">
+<img src="assets/logo.png" width="96" height="96" alt="gas-hourly-forecast logo">
 
 # gas-hourly-forecast
 
@@ -14,7 +14,7 @@
 
 [**🔗 Try the live dashboard →**](https://gas-hourly-forecast.streamlit.app/)
 
-<img src="assets/demo-placeholder.svg" width="720" alt="Dashboard demo placeholder — replace with a real screen recording">
+<img src="assets/demo-placeholder.gif" width="720" alt="Dashboard demo placeholder — replace with a real screen recording">
 
 </div>
 
