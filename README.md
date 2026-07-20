@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/logo.png" width="96" height="96" alt="gas-hourly-forecast logo">
-
 # gas-hourly-forecast
 
 **Hourly forecasting of French natural gas consumption, powered by a dynamically-adjusted Kalman/SUR model.**
